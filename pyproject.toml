@@ -1,0 +1,35 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ds-mcp"
+version = "2.0.0"
+description = "Scalable MCP server framework for exposing database tables as AI-accessible tools"
+readme = "README.md"
+requires-python = ">=3.10"
+authors = [
+    {name = "ATPCO Data Science"}
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+]
+
+dependencies = [
+    "mcp[cli]>=1.2.0",
+    "pandas>=1.5.0",
+    "boto3>=1.26.0",
+    "mysql-connector-python>=8.0.0",
+    "redshift-connector>=2.0.0",
+]
+
+[project.scripts]
+ds-mcp-server = "ds_mcp.server:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
