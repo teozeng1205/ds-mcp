@@ -525,3 +525,88 @@ def issue_scope_breakdown_by_site(provider: str, site: str, lookback_days: int =
 
     except Exception as e:
         return json.dumps({"error": str(e)}, indent=2)
+
+
+def issue_scope_quick_by_site(provider: str, site: str, lookback_days: int = 3, per_dim_limit: int = 5) -> str:
+    """
+    Quick scope for provider+site (fast): returns only obs_hour and pos.
+    Args: provider, site, lookback_days (default 3), per_dim_limit (default 5).
+    Returns JSON: filters, total_count, available_dimensions, breakdowns.
+    """
+    per_dim_limit = min(max(1, per_dim_limit), 25)
+    cols = _get_columns()
+
+    provider_col = _pick_column(cols, ["providercode", "provider"]) or "providercode"
+    site_col = _pick_column(cols, ["sitecode", "site", "site_code"]) or "sitecode"
+    date_col = _pick_column(cols, ["scheduledate"]) or "scheduledate"
+    date_expr = _date_expr(date_col, cols.get(date_col, ""))
+
+    pos_col = _pick_column(cols, ["pos", "point_of_sale"])
+
+    provider_filter = f"{provider_col} ILIKE %s"
+    site_filter = f"{site_col} ILIKE %s"
+    params = [f"%{provider}%", f"%{site}%"]
+
+    base_where = f"""
+    WHERE {provider_filter}
+      AND {site_filter}
+      AND {date_expr} >= CURRENT_DATE - {lookback_days}
+      AND {_build_site_filter()}
+    """
+
+    filters_output = {
+        "provider_like": provider,
+        "site_like": site,
+        "issue_type": "site_related",
+        "lookback_days": lookback_days,
+    }
+
+    result = {
+        "filters": filters_output,
+        "total_count": 0,
+        "available_dimensions": [],
+        "breakdowns": {}
+    }
+
+    try:
+        conn = _get_conn()
+
+        with conn.cursor() as cur:
+            _safe_execute(cur, f"SELECT COUNT(*) FROM {TABLE_NAME} {base_where}", tuple(params))
+            result["total_count"] = int(cur.fetchone()[0])
+
+        def run_dimension(name: str, select_expr: str, extra_where: str = ""):
+            sql = f"""
+            SELECT {select_expr} AS bucket, COUNT(*) AS cnt
+            FROM {TABLE_NAME}
+            {base_where} {extra_where}
+            GROUP BY 1
+            ORDER BY 2 DESC
+            LIMIT {per_dim_limit}
+            """
+            try:
+                with conn.cursor() as cur:
+                    _safe_execute(cur, sql, tuple(params))
+                    rows = []
+                    for bucket, cnt in cur.fetchall():
+                        pct = cnt / result["total_count"] if result["total_count"] > 0 else 0
+                        rows.append({
+                            "bucket": str(bucket) if bucket is not None else "null",
+                            "count": int(cnt),
+                            "pct": round(pct, 4)
+                        })
+                    if rows:
+                        result["breakdowns"][name] = rows
+                        result["available_dimensions"].append(name)
+            except Exception:
+                pass
+
+        # Only quick dimensions
+        run_dimension("obs_hour", f"DATE_TRUNC('hour', {_build_event_ts()})")
+        if pos_col:
+            run_dimension("pos", f"NULLIF(TRIM({pos_col}::VARCHAR), '')", f"AND {pos_col} IS NOT NULL")
+
+        return json.dumps(result, indent=2)
+
+    except Exception as e:
+        return json.dumps({"error": str(e)}, indent=2)
