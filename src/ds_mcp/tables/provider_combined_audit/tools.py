@@ -325,7 +325,6 @@ def top_site_issues(provider: str, lookback_days: int = 7, limit: int = 10) -> s
     WHERE {provider_filter}
       AND {_sales_date_bound(lookback_days)}
       AND {date_expr} >= CURRENT_DATE - {lookback_days}
-      AND {_build_site_filter()}
     GROUP BY 1
     ORDER BY 2 DESC
     LIMIT {limit}
@@ -340,7 +339,6 @@ def top_site_issues(provider: str, lookback_days: int = 7, limit: int = 10) -> s
 
             filters_output = {
                 "provider_like": provider,
-                "issue_type": "site_related",
                 "lookback_days": lookback_days
             }
 
@@ -385,13 +383,11 @@ def issue_scope_breakdown_by_site(provider: str, site: str, lookback_days: int =
       AND {site_filter}
       AND {_sales_date_bound(lookback_days)}
       AND {date_expr} >= CURRENT_DATE - {lookback_days}
-      AND {_build_site_filter()}
     """
 
     filters_output = {
         "provider_like": provider,
         "site_like": site,
-        "issue_type": "site_related",
         "lookback_days": lookback_days,
     }
 
@@ -482,7 +478,6 @@ def issue_scope_quick_by_site(provider: str, site: str, lookback_days: int = 3, 
       AND {site_filter}
       AND {_sales_date_bound(lookback_days)}
       AND {date_expr} >= CURRENT_DATE - {lookback_days}
-      AND {_build_site_filter()}
     """
 
     filters_output = {
@@ -596,13 +591,11 @@ def issue_scope_by_site_dimensions(
       AND {site_filter}
       AND {_sales_date_bound(lookback_days)}
       AND {date_expr} >= CURRENT_DATE - {lookback_days}
-      AND {_build_site_filter()}
     """
 
     filters_output = {
         "provider_like": provider,
         "site_like": site,
-        "issue_type": "site_related",
         "lookback_days": lookback_days,
         "requested_dims": dims_req,
     }
@@ -695,7 +688,6 @@ def overview_site_issues_today(per_dim_limit: int = 5) -> str:
     base_where = f"""
     WHERE sales_date = {today_expr}
       AND {date_expr} >= CURRENT_DATE
-      AND {_build_site_filter()}
     """
 
     result = {
@@ -804,7 +796,6 @@ def list_provider_sites(provider: str, lookback_days: int = 7, limit: int = 10) 
     WHERE {provider_filter}
       AND {_sales_date_bound(lookback_days)}
       AND {date_expr} >= CURRENT_DATE - {lookback_days}
-      AND {_build_site_filter()}
       AND NULLIF(TRIM({site_col}::VARCHAR), '') IS NOT NULL
     """
 
@@ -838,7 +829,6 @@ def list_provider_sites(provider: str, lookback_days: int = 7, limit: int = 10) 
         return json.dumps({
             "filters": {
                 "provider_like": provider,
-                "issue_type": "site_related",
                 "lookback_days": lookback_days,
             },
             "rows": rows,
