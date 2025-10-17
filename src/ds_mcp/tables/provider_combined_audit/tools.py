@@ -104,6 +104,11 @@ def _sales_date_bound(days: int) -> str:
     )
 
 
+def _today_int() -> str:
+    """Returns SQL expression for today's YYYYMMDD int."""
+    return "CAST(TO_CHAR(CURRENT_DATE, 'YYYYMMDD') AS INT)"
+
+
 # ============================================================================
 # SQL Macro Expansion
 # ============================================================================
@@ -645,6 +650,106 @@ def issue_scope_by_site_dimensions(
         if "depart_dow" in dims_req and depart_col:
             depart_expr = _date_expr(depart_col, cols.get(depart_col, ""))
             run_dimension("depart_dow", f"EXTRACT(DOW FROM {depart_expr})::INT")
+
+        return json.dumps(result, indent=2)
+
+    except Exception as e:
+        return json.dumps({"error": str(e)}, indent=2)
+
+
+def overview_site_issues_today(per_dim_limit: int = 5) -> str:
+    """
+    Overview of site-related issues today across all providers (fast, succinct).
+    Returns JSON: date (YYYYMMDD), total_count, breakdowns: issues, providers, pos, obs_hour.
+    """
+    per_dim_limit = min(max(1, per_dim_limit), 25)
+    cols = _get_columns()
+
+    provider_col = _pick_column(cols, ["providercode", "provider"]) or "providercode"
+    date_col = _pick_column(cols, ["scheduledate"]) or "scheduledate"
+    date_expr = _date_expr(date_col, cols.get(date_col, ""))
+    pos_col = _pick_column(cols, ["pos", "point_of_sale"])
+
+    today_expr = _today_int()
+
+    base_where = f"""
+    WHERE sales_date = {today_expr}
+      AND {date_expr} >= CURRENT_DATE
+      AND {_build_site_filter()}
+    """
+
+    result = {
+        "date": None,
+        "total_count": 0,
+        "breakdowns": {}
+    }
+
+    try:
+        conn = _get_conn()
+
+        # total_count and date
+        with conn.cursor() as cur:
+            _safe_execute(cur, f"SELECT {today_expr} AS yyyymmdd, COUNT(*) FROM {TABLE_NAME} {base_where}")
+            row = cur.fetchone()
+            result["date"] = int(row[0]) if row and row[0] is not None else None
+            result["total_count"] = int(row[1]) if row and row[1] is not None else 0
+
+        def run_dim(name: str, sql: str):
+            with conn.cursor() as cur:
+                _safe_execute(cur, sql)
+                rows = []
+                for bucket, cnt in cur.fetchall():
+                    pct = cnt / result["total_count"] if result["total_count"] > 0 else 0
+                    rows.append({
+                        "bucket": str(bucket) if bucket is not None else "null",
+                        "count": int(cnt),
+                        "pct": round(pct, 4)
+                    })
+                if rows:
+                    result["breakdowns"][name] = rows
+
+        # Normalize issues by lowercasing to avoid duplicates like 'No Response' vs 'no response'
+        issues_sql = f"""
+        SELECT NULLIF(TRIM(LOWER(COALESCE(issue_reasons::VARCHAR, issue_sources::VARCHAR))), '') AS issue_key,
+               COUNT(*) AS cnt
+        FROM {TABLE_NAME}
+        {base_where}
+        GROUP BY 1
+        ORDER BY 2 DESC
+        LIMIT {per_dim_limit}
+        """
+        run_dim("issues", issues_sql)
+
+        providers_sql = f"""
+        SELECT NULLIF(TRIM({provider_col}::VARCHAR), '') AS provider, COUNT(*) AS cnt
+        FROM {TABLE_NAME}
+        {base_where}
+        GROUP BY 1
+        ORDER BY 2 DESC
+        LIMIT {per_dim_limit}
+        """
+        run_dim("providers", providers_sql)
+
+        if pos_col:
+            pos_sql = f"""
+            SELECT NULLIF(TRIM({pos_col}::VARCHAR), '') AS pos, COUNT(*) AS cnt
+            FROM {TABLE_NAME}
+            {base_where}
+            GROUP BY 1
+            ORDER BY 2 DESC
+            LIMIT {per_dim_limit}
+            """
+            run_dim("pos", pos_sql)
+
+        obs_hour_sql = f"""
+        SELECT DATE_TRUNC('hour', {_build_event_ts()}) AS obs_hour, COUNT(*) AS cnt
+        FROM {TABLE_NAME}
+        {base_where}
+        GROUP BY 1
+        ORDER BY 2 DESC
+        LIMIT {per_dim_limit}
+        """
+        run_dim("obs_hour", obs_hour_sql)
 
         return json.dumps(result, indent=2)
 

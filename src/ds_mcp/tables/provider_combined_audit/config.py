@@ -32,6 +32,7 @@ def get_table_config() -> TableConfig:
             tools.top_site_issues,
             tools.issue_scope_quick_by_site,
             tools.issue_scope_by_site_dimensions,
+            tools.overview_site_issues_today,
         ],
         metadata={
             "primary_key": "unknown",
