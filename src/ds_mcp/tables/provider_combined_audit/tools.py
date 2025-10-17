@@ -97,6 +97,13 @@ def _build_event_ts(alias: Optional[str] = None) -> str:
     return f"{case_expr} AS {alias}" if alias else case_expr
 
 
+def _sales_date_bound(days: int) -> str:
+    """Predicate to prune by partition: sales_date >= YYYYMMDD int for current_date - days."""
+    return (
+        f"sales_date >= CAST(TO_CHAR(CURRENT_DATE - {days}, 'YYYYMMDD') AS INT)"
+    )
+
+
 # ============================================================================
 # SQL Macro Expansion
 # ============================================================================
@@ -304,6 +311,7 @@ def top_site_issues(provider: str, lookback_days: int = 7, limit: int = 10) -> s
         COUNT(*) AS cnt
     FROM {TABLE_NAME}
     WHERE {provider_filter}
+      AND {_sales_date_bound(lookback_days)}
       AND {date_expr} >= CURRENT_DATE - {lookback_days}
       AND {_build_site_filter()}
     GROUP BY 1
@@ -332,105 +340,7 @@ def top_site_issues(provider: str, lookback_days: int = 7, limit: int = 10) -> s
         return json.dumps({"error": str(e)}, indent=2)
 
 
-def issue_scope_breakdown(provider: str, lookback_days: int = 7, per_dim_limit: int = 10) -> str:
-    """
-    Scope of site issues for a provider across: obs_hour, pos, od, cabin, depart_week.
-    Args: provider, lookback_days (default 7), per_dim_limit (default 10, max 25).
-    Returns JSON: filters, total_count, available_dimensions, breakdowns.
-    """
-    per_dim_limit = min(max(1, per_dim_limit), 25)
-    cols = _get_columns()
-
-    # Identify columns
-    provider_col = _pick_column(cols, ["providercode", "provider"]) or "providercode"
-    date_col = _pick_column(cols, ["scheduledate"]) or "scheduledate"
-    date_expr = _date_expr(date_col, cols.get(date_col, ""))
-
-    pos_col = _pick_column(cols, ["pos", "point_of_sale"])
-    cabin_col = _pick_column(cols, ["cabin", "bookingcabin"])
-    depart_col = _pick_column(cols, ["departdate", "legdeparturedate"])
-
-    has_od = "originairportcode" in cols and "destinationairportcode" in cols
-
-    # Simple provider pattern
-    provider_filter = f"{provider_col} ILIKE %s"
-    provider_params = [f"%{provider}%"]
-
-    # Base filter
-    base_where = f"""
-    WHERE {provider_filter}
-      AND {date_expr} >= CURRENT_DATE - {lookback_days}
-      AND {_build_site_filter()}
-    """
-
-    filters_output = {
-        "provider_like": provider,
-        "issue_type": "site_related",
-        "lookback_days": lookback_days
-    }
-
-    result = {
-        "filters": filters_output,
-        "total_count": 0,
-        "available_dimensions": [],
-        "breakdowns": {}
-    }
-
-    try:
-        conn = _get_conn()
-
-        # Get total count
-        with conn.cursor() as cur:
-            _safe_execute(cur, f"SELECT COUNT(*) FROM {TABLE_NAME} {base_where}", tuple(provider_params))
-            result["total_count"] = int(cur.fetchone()[0])
-
-        # Helper to run dimension breakdown
-        def run_dimension(name: str, select_expr: str, extra_where: str = ""):
-            sql = f"""
-            SELECT {select_expr} AS bucket, COUNT(*) AS cnt
-            FROM {TABLE_NAME}
-            {base_where} {extra_where}
-            GROUP BY 1
-            ORDER BY 2 DESC
-            LIMIT {per_dim_limit}
-            """
-            try:
-                with conn.cursor() as cur:
-                    _safe_execute(cur, sql, tuple(provider_params))
-                    rows = []
-                    for bucket, cnt in cur.fetchall():
-                        pct = cnt / result["total_count"] if result["total_count"] > 0 else 0
-                        rows.append({
-                            "bucket": str(bucket) if bucket is not None else "null",
-                            "count": int(cnt),
-                            "pct": round(pct, 4)
-                        })
-                    if rows:
-                        result["breakdowns"][name] = rows
-                        result["available_dimensions"].append(name)
-            except Exception:
-                pass  # Skip dimension if query fails
-
-        # Run breakdowns for available dimensions
-        run_dimension("obs_hour", f"DATE_TRUNC('hour', {_build_event_ts()})")
-
-        if pos_col:
-            run_dimension("pos", f"NULLIF(TRIM({pos_col}::VARCHAR), '')", f"AND {pos_col} IS NOT NULL")
-
-        if has_od:
-            run_dimension("od", "(originairportcode || '-' || destinationairportcode)")
-
-        if cabin_col:
-            run_dimension("cabin", f"NULLIF(TRIM({cabin_col}::VARCHAR), '')", f"AND {cabin_col} IS NOT NULL")
-
-        if depart_col:
-            depart_expr = _date_expr(depart_col, cols.get(depart_col, ""))
-            run_dimension("depart_week", f"DATE_TRUNC('week', {depart_expr})")
-
-        return json.dumps(result, indent=2)
-
-    except Exception as e:
-        return json.dumps({"error": str(e)}, indent=2)
+# Note: removed issue_scope_breakdown (non-site) for simplicity as requested.
 
 
 def issue_scope_breakdown_by_site(provider: str, site: str, lookback_days: int = 7, per_dim_limit: int = 10) -> str:
@@ -459,6 +369,7 @@ def issue_scope_breakdown_by_site(provider: str, site: str, lookback_days: int =
     base_where = f"""
     WHERE {provider_filter}
       AND {site_filter}
+      AND {_sales_date_bound(lookback_days)}
       AND {date_expr} >= CURRENT_DATE - {lookback_days}
       AND {_build_site_filter()}
     """
@@ -550,6 +461,7 @@ def issue_scope_quick_by_site(provider: str, site: str, lookback_days: int = 3, 
     base_where = f"""
     WHERE {provider_filter}
       AND {site_filter}
+      AND {_sales_date_bound(lookback_days)}
       AND {date_expr} >= CURRENT_DATE - {lookback_days}
       AND {_build_site_filter()}
     """

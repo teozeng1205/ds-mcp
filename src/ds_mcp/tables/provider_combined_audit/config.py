@@ -27,14 +27,11 @@ def get_table_config() -> TableConfig:
         table_name="provider_combined_audit",
         connector_type="analytics",
         tools=[
-            # Flexible SQL tool with macros
             tools.query_audit,
-            # Schema and guided analysis helpers
             tools.get_table_schema,
             tools.top_site_issues,
-            tools.issue_scope_breakdown,
-            tools.issue_scope_breakdown_by_site,
             tools.issue_scope_quick_by_site,
+            # Note: heavier breakdown tools removed for simplicity and reliability.
         ],
         metadata={
             "primary_key": "unknown",
