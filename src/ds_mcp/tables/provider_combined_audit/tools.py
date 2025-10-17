@@ -370,6 +370,93 @@ def issue_scope_by_site_dimensions(
     return json.dumps(results, indent=2)
 
 
+def issue_scope_combined(
+    provider: str,
+    site: str,
+    dims: List[str],
+    lookback_days: int = 7,
+    limit: int = 200,
+) -> str:
+    """
+    Combined multi-dimensional scope for provider+site using ONE SQL statement.
+
+    Args:
+        provider: ILIKE pattern for providercode.
+        site: ILIKE pattern for sitecode.
+        dims: 2–4 dimensions from: obs_hour, pos, od, cabin, triptype, los, depart_week, depart_dow.
+        lookback_days: Window in days.
+        limit: Max rows to return (1–2000).
+
+    Returns:
+        Single table JSON with requested dimension columns and count.
+    """
+    allowed = {
+        "obs_hour",
+        "pos",
+        "od",
+        "cabin",
+        "triptype",
+        "los",
+        "depart_week",
+        "depart_dow",
+    }
+    dims_req = [d.strip().lower() for d in (dims or []) if d and d.strip().lower() in allowed]
+    if not (2 <= len(dims_req) <= 4):
+        return json.dumps({"error": "dims must contain 2 to 4 valid items"}, indent=2)
+
+    limit = min(max(1, limit), 2000)
+    date_expr = _date_expr(DATE_COL, "bigint")
+
+    select_map = {
+        "obs_hour": "{{OBS_HOUR}} AS obs_hour",
+        "pos": f"NULLIF(TRIM({POS_COL}::VARCHAR), '') AS pos",
+        "od": "(originairportcode || '-' || destinationairportcode) AS od",
+        "cabin": f"NULLIF(TRIM({CABIN_COL}::VARCHAR), '') AS cabin",
+        "triptype": f"NULLIF(TRIM({TRIPTYPE_COL}::VARCHAR), '') AS triptype",
+        "los": f"{LOS_COL}::VARCHAR AS los",
+        "depart_week": f"DATE_TRUNC('week', TO_DATE({DEPARTDATE_COL}::VARCHAR, 'YYYYMMDD')) AS depart_week",
+        "depart_dow": f"EXTRACT(DOW FROM TO_DATE({DEPARTDATE_COL}::VARCHAR, 'YYYYMMDD'))::INT AS depart_dow",
+    }
+
+    # Build SELECT list and GROUP BY clause
+    select_cols = [select_map[d] for d in dims_req]
+    select_list = ", ".join(select_cols) + ", COUNT(*) AS cnt"
+    group_by = ", ".join(str(i) for i in range(1, len(dims_req) + 1))
+
+    # Base filters
+    base_where = (
+        f"WHERE {PROVIDER_COL} ILIKE %s "
+        f"AND {SITE_COL} ILIKE %s "
+        f"AND {_sales_date_bound(lookback_days)} "
+        f"AND {date_expr} >= CURRENT_DATE - {lookback_days} "
+        "AND NULLIF(TRIM(issue_sources::VARCHAR), '') IS NOT NULL "
+    )
+
+    # Additional not-null filters for specific dimensions to mirror 1D tools
+    extra_filters = []
+    if "pos" in dims_req:
+        extra_filters.append(f"{POS_COL} IS NOT NULL")
+    if "cabin" in dims_req:
+        extra_filters.append(f"{CABIN_COL} IS NOT NULL")
+    if "triptype" in dims_req:
+        extra_filters.append(f"{TRIPTYPE_COL} IS NOT NULL")
+    if "los" in dims_req:
+        extra_filters.append(f"{LOS_COL} IS NOT NULL")
+
+    extra_where = (" AND " + " AND ".join(extra_filters)) if extra_filters else ""
+
+    sql = (
+        "SELECT "
+        + select_list
+        + " FROM {{PCA}} "
+        + f"{base_where}{extra_where} "
+        + f"GROUP BY {group_by} "
+        + "ORDER BY cnt DESC "
+        + f"LIMIT {limit}"
+    )
+    params = [f"%{provider}%", f"%{site}%"]
+    return _execute_select(sql, params)
+
 def overview_site_issues_today(per_dim_limit: int = 50) -> str:
     """
     High-level overview for today across all providers using a single SQL query.

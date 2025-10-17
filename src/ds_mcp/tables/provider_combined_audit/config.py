@@ -33,6 +33,7 @@ def get_table_config() -> TableConfig:
             tools.list_provider_sites,
             tools.issue_scope_quick_by_site,
             tools.issue_scope_by_site_dimensions,
+            tools.issue_scope_combined,
             tools.overview_site_issues_today,
         ],
         metadata={
