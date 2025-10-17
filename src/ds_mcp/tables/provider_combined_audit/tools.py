@@ -131,7 +131,7 @@ def _get_columns() -> Dict[str, str]:
 ## Assume canonical column names present in provider_combined_audit
 PROVIDER_COL = "providercode"
 SITE_COL = "sitecode"
-DATE_COL = "scheduledate"
+DATE_COL = "sales_date"
 POS_COL = "pos"
 CABIN_COL = "cabin"
 TRIPTYPE_COL = "triptype"
