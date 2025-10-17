@@ -302,7 +302,7 @@ def issue_scope_by_site_dimensions(
 def issue_scope_combined(
     provider: str,
     site: str,
-    dims: List[str],
+    dims: Optional[List[str]] = None,
     lookback_days: int = 7,
     limit: int = 200,
 ) -> str:
@@ -313,6 +313,7 @@ def issue_scope_combined(
         provider: ILIKE pattern for providercode.
         site: ILIKE pattern for sitecode.
         dims: 2–4 dimensions from: obs_hour, pos, od, cabin, triptype, los, depart_week, depart_dow.
+              If omitted or empty, defaults to ['obs_hour', 'pos', 'triptype', 'los'].
         lookback_days: Window in days.
         limit: Max rows to return (1–2000).
 
@@ -329,6 +330,9 @@ def issue_scope_combined(
         "depart_week",
         "depart_dow",
     }
+    # Default popular scope if not provided
+    if not dims:
+        dims = ["obs_hour", "pos", "triptype", "los"]
     dims_req = [d.strip().lower() for d in (dims or []) if d and d.strip().lower() in allowed]
     if not (2 <= len(dims_req) <= 4):
         return json.dumps({"error": "dims must contain 2 to 4 valid items"}, indent=2)
