@@ -18,20 +18,8 @@ else
     exit 1
 fi
 
-# If an AWS profile is selected, prefer it over static creds from .env.sh
-if [ -n "$AWS_PROFILE" ]; then
-    unset AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN
-    export AWS_SDK_LOAD_CONFIG=1
-    if command -v aws >/dev/null 2>&1; then
-        if ! aws sts get-caller-identity --profile "$AWS_PROFILE" >/dev/null 2>&1; then
-            echo "AWS SSO login for profile $AWS_PROFILE..." >&2
-            aws sso login --profile "$AWS_PROFILE" || {
-                echo "ERROR: aws sso login failed for $AWS_PROFILE" >&2; exit 1; }
-        fi
-    else
-        echo "Warning: aws CLI not found; cannot auto-login SSO." >&2
-    fi
-fi
+# Setup AWS authentication (validates existing session or triggers SSO login)
+source "$SCRIPT_DIR/common_aws_setup.sh"
 
 # Export PYTHONPATH to include src directory and parent for threevictors
 export PYTHONPATH="$ROOT_DIR/src:$ROOT_DIR/..:$PYTHONPATH"

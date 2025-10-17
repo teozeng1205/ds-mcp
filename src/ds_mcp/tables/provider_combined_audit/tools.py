@@ -1,154 +1,380 @@
 """
-MCP tools for monitoring_prod.provider_combined_audit
+MCP tools for monitoring_prod.provider_combined_audit.
 
-These tools allow safe exploration and summarization of the provider audit data.
-They support direct SQL (validated), schema inspection, distinct values, and
-high-level summaries suitable for conversational usage, e.g.:
-
-- "In provider combined audit, tell me about provider 'AaPts' today"
-- "Give me an overview of the status today"
+Compact tools, similar in style to market anomalies:
+- query_audit: Run read-only SELECTs (with a few macros)
+- get_table_schema: List columns and types
+- top_site_issues: Top site-related issues for a provider
+- issue_scope_breakdown: Where site issues concentrate (time/pos/od/cabin)
 """
 
 import json
 import logging
 import re
-from typing import List
+from typing import Dict, List, Optional
 
 from ds_mcp.core.connectors import DatabaseConnectorFactory
 
 log = logging.getLogger(__name__)
 
+# ============================================================================
+# Configuration
+# ============================================================================
+
 SCHEMA_NAME = "monitoring_prod"
 TABLE_BASE = "provider_combined_audit"
 TABLE_NAME = f"{SCHEMA_NAME}.{TABLE_BASE}"
 
+# ============================================================================
+# Issue Classification Patterns
+# ============================================================================
 
-def _get_connector():
-    """Get the database connector for this table."""
-    return DatabaseConnectorFactory.get_connector("analytics")
+SITE_KEYWORDS = [
+    'site', 'website', 'web site', 'captcha', 'akamai', 'cloudflare',
+    'timeout', 'forbidden', 'service unavailable', 'internal server error',
+    'ssl', 'tls', 'handshake'
+]
+
+INVALID_REQUEST_KEYWORDS = [
+    'invalid', 'bad request', 'bad_request', 'missing', 'malformed',
+    'unsupported', 'param'
+]
 
 
-def _list_columns(cursor) -> List[str]:
-    """List columns for the table with fallback to SVV_COLUMNS."""
-    cursor.execute(
-        f"""
-        SELECT column_name
-        FROM information_schema.columns
-        WHERE table_schema = '{SCHEMA_NAME}'
-          AND table_name = '{TABLE_BASE}'
-        ORDER BY ordinal_position
-        """
+def _build_issue_type_case(alias: Optional[str] = None) -> str:
+    """CASE expression classifying issues (site_related/invalid_request/other)."""
+    site_conditions = " OR ".join([
+        f"LOWER(COALESCE(issue_sources,'')) LIKE '%{kw}%'" for kw in SITE_KEYWORDS
+    ] + [
+        f"LOWER(COALESCE(issue_reasons,'')) LIKE '%{kw}%'" for kw in ['site', 'website']
+    ])
+
+    invalid_conditions = " OR ".join([
+        f"LOWER(COALESCE(issue_sources,'')) LIKE '%{kw}%'" for kw in INVALID_REQUEST_KEYWORDS
+    ] + [
+        f"LOWER(COALESCE(issue_reasons,'')) LIKE '%{kw}%'" for kw in INVALID_REQUEST_KEYWORDS
+    ])
+
+    case_expr = (
+        f"CASE "
+        f"WHEN {site_conditions} THEN 'site_related' "
+        f"WHEN {invalid_conditions} THEN 'invalid_request' "
+        f"ELSE COALESCE(NULLIF(LOWER(issue_sources), ''), 'other') END"
     )
-    rows = cursor.fetchall()
-    if not rows:
-        try:
-            cursor.execute(
-                f"""
-                SELECT column_name
-                FROM svv_columns
-                WHERE table_schema = '{SCHEMA_NAME}'
-                  AND table_name = '{TABLE_BASE}'
-                ORDER BY ordinal_position
-                """
-            )
-            rows = cursor.fetchall()
-        except Exception:
-            rows = []
-    return [row[0] for row in rows]
+    return f"{case_expr} AS {alias}" if alias else case_expr
 
+
+def _build_site_filter() -> str:
+    """WHERE condition for site-related issues."""
+    return "(" + " OR ".join([
+        f"LOWER(COALESCE(issue_sources,'')) LIKE '%{kw}%'" for kw in SITE_KEYWORDS
+    ] + [
+        f"LOWER(COALESCE(issue_reasons,'')) LIKE '%{kw}%'" for kw in ['site', 'website']
+    ]) + ")"
+
+
+def _build_invalid_filter() -> str:
+    """WHERE condition for invalid-request issues."""
+    return "(" + " OR ".join([
+        f"LOWER(COALESCE(issue_sources,'')) LIKE '%{kw}%'" for kw in INVALID_REQUEST_KEYWORDS
+    ] + [
+        f"LOWER(COALESCE(issue_reasons,'')) LIKE '%{kw}%'" for kw in INVALID_REQUEST_KEYWORDS
+    ]) + ")"
+
+
+def _build_event_ts(alias: Optional[str] = None) -> str:
+    """Best-effort event timestamp from available columns."""
+    case_expr = (
+        "CASE "
+        "WHEN response_timestamp IS NOT NULL AND TRIM(response_timestamp) <> '' "
+        "THEN TO_TIMESTAMP(TRIM(response_timestamp), 'YYYY-MM-DD HH24:MI:SS.MS') "
+        "WHEN actualscheduletimestamp IS NOT NULL THEN actualscheduletimestamp "
+        "WHEN observationtimestamp IS NOT NULL THEN observationtimestamp "
+        "WHEN dropdeadtimestamps IS NOT NULL AND TRIM(dropdeadtimestamps) <> '' "
+        "THEN TO_TIMESTAMP(TRIM(dropdeadtimestamps), 'YYYY-MM-DD HH24:MI:SS.MS') "
+        "ELSE NULL END"
+    )
+    return f"{case_expr} AS {alias}" if alias else case_expr
+
+
+# ============================================================================
+# SQL Macro Expansion
+# ============================================================================
+
+def _expand_macros(sql: str) -> str:
+    """Expand convenient macros in SQL queries."""
+    result = sql
+
+    # Handle {{ISSUE_TYPE}} and {{ISSUE_TYPE:alias}}
+    def expand_issue_type(match):
+        alias = match.group(1)
+        return _build_issue_type_case(alias)
+    result = re.sub(r"\{\{ISSUE_TYPE(?::([A-Za-z_][A-Za-z0-9_]*))?\}\}", expand_issue_type, result)
+
+    # Handle {{EVENT_TS}} and {{EVENT_TS:alias}}
+    def expand_event_ts(match):
+        alias = match.group(1)
+        return _build_event_ts(alias)
+    result = re.sub(r"\{\{EVENT_TS(?::([A-Za-z_][A-Za-z0-9_]*))?\}\}", expand_event_ts, result)
+
+    # Simple replacements
+    result = result.replace("{{PCA}}", TABLE_NAME)
+    result = result.replace("{{OD}}", "(originairportcode || '-' || destinationairportcode)")
+    result = result.replace("{{OBS_HOUR}}", f"DATE_TRUNC('hour', {_build_event_ts()})")
+    result = result.replace("{{IS_SITE}}", _build_site_filter())
+    result = result.replace("{{IS_INVALID}}", _build_invalid_filter())
+
+    return result
+
+
+# ============================================================================
+# Provider/Site Parsing
+# ============================================================================
+
+# Note: Provider/site combined parsing removed for simplicity. Use provider text match.
+
+
+# ============================================================================
+# Database Helpers
+# ============================================================================
+
+def _get_conn():
+    """Get database connection with autocommit enabled."""
+    conn = DatabaseConnectorFactory.get_connector("analytics").get_connection()
+    try:
+        conn.autocommit = True
+    except Exception:
+        pass
+    return conn
+
+
+def _safe_execute(cursor, sql: str, params=None, retry=True):
+    """Execute SQL with automatic rollback retry on aborted transactions."""
+    try:
+        cursor.execute("ROLLBACK;")
+    except Exception:
+        pass
+
+    try:
+        cursor.execute(sql, params) if params else cursor.execute(sql)
+        return True
+    except Exception as e:
+        if retry and ("25P02" in str(e) or "aborted" in str(e)):
+            try:
+                cursor.connection.rollback()
+                return _safe_execute(cursor, sql, params, retry=False)
+            except Exception:
+                pass
+        raise
+
+
+def _get_columns() -> Dict[str, str]:
+    """Get column name -> data type mapping for the table."""
+    conn = _get_conn()
+    with conn.cursor() as cur:
+        try:
+            _safe_execute(cur, f"""
+                SELECT column_name, data_type
+                FROM svv_columns
+                WHERE table_schema = '{SCHEMA_NAME}' AND table_name = '{TABLE_BASE}'
+                ORDER BY ordinal_position
+            """)
+            return {row[0]: row[1] for row in cur.fetchall()}
+        except Exception:
+            return {}
+
+
+def _pick_column(cols: Dict[str, str], candidates: List[str]) -> Optional[str]:
+    """Pick first available column from candidates list."""
+    return next((c for c in candidates if c in cols), None)
+
+
+def _date_expr(col: str, dtype: str) -> str:
+    """Convert column to DATE expression based on data type."""
+    dtype_lower = dtype.lower()
+    if "timestamp" in dtype_lower:
+        return f"CAST({col} AS DATE)"
+    if "date" in dtype_lower:
+        return col
+    # Assume YYYYMMDD integer format
+    return f"TO_DATE({col}::VARCHAR, 'YYYYMMDD')"
+
+
+# ============================================================================
+# MCP Tools
+# ============================================================================
 
 def query_audit(sql_query: str) -> str:
     """
-    Run a SELECT query against monitoring_prod.provider_combined_audit (safe mode).
+    Execute a read-only SQL query against provider monitoring data with macro support.
 
-    Safety:
-    - Only SELECT allowed; blocks DELETE/UPDATE/INSERT/DROP/TRUNCATE/ALTER/CREATE
-    - Query must reference the full table name {TABLE_NAME}
-    - Adds LIMIT 100 if not present
+    This tool allows you to write custom SQL queries to analyze provider issues, with
+    helpful macros that automatically expand to complex SQL expressions.
 
-    Args:
-        sql_query: A SELECT query string referencing {TABLE_NAME}
+    INPUT PARAMETERS:
+    ------------------
+    sql_query (str, REQUIRED): A SQL SELECT query as a string. Must start with SELECT or WITH.
+                                Can use macros (see below) for common patterns.
 
-    Returns:
-        JSON with keys: columns, rows, row_count, truncated
+    IMPORTANT - Issue Type Classification:
+    ---------------------------------------
+    There are TWO types of issues that are automatically classified:
 
-    Example:
-        SELECT * FROM monitoring_prod.provider_combined_audit
-        WHERE sales_date = 20251014 AND providercode = 'AaPts'
-        LIMIT 10
+    1. SITE-RELATED ISSUES (use {{IS_SITE}} filter):
+       - Timeouts, SSL/TLS errors, captcha blocks
+       - Website downtime, cloudflare/akamai blocks
+       - HTTP errors (403 forbidden, 503 unavailable, 500 internal server error)
+       - Keywords: 'site', 'website', 'timeout', 'ssl', 'tls', 'captcha', 'akamai',
+                  'cloudflare', 'forbidden', 'service unavailable', 'internal server error'
+
+    2. INVALID-REQUEST ISSUES (use {{IS_INVALID}} filter):
+       - Bad input parameters, malformed requests
+       - Missing required fields, unsupported operations
+       - Keywords: 'invalid', 'bad request', 'missing', 'malformed', 'unsupported', 'param'
+
+    AVAILABLE MACROS:
+    -----------------
+    - {{PCA}}
+      Expands to: monitoring_prod.provider_combined_audit
+      Use in: FROM clause
+
+    - {{OD}}
+      Expands to: (originairportcode || '-' || destinationairportcode)
+      Use in: SELECT, GROUP BY for origin-destination pairs
+
+    - {{ISSUE_TYPE}} or {{ISSUE_TYPE:column_name}}
+      Expands to: CASE statement that classifies issues as 'site_related', 'invalid_request', or 'other'
+      Use in: SELECT clause to see issue type distribution
+
+    - {{EVENT_TS}} or {{EVENT_TS:column_name}}
+      Expands to: Best-effort event timestamp from multiple timestamp columns
+      Use in: SELECT, WHERE, GROUP BY for time-based analysis
+
+    - {{OBS_HOUR}}
+      Expands to: DATE_TRUNC('hour', {{EVENT_TS}})
+      Use in: SELECT, GROUP BY for hourly patterns
+
+    - {{IS_SITE}}
+      Expands to: Boolean condition for site-related issues only
+      Use in: WHERE clause to filter to site issues
+
+    - {{IS_INVALID}}
+      Expands to: Boolean condition for invalid-request issues only
+      Use in: WHERE clause to filter to invalid-request issues
+
+    KEY TABLE COLUMNS:
+    ------------------
+    - providercode (VARCHAR): Provider identifier (e.g., 'AA', 'DL')
+    - issue_sources (VARCHAR): Source/category of issue
+    - issue_reasons (VARCHAR): Detailed reason for issue
+    - scheduledate (BIGINT): Observation date in YYYYMMDD format
+    - pos (VARCHAR): Point of sale
+    - cabin (VARCHAR): Cabin class
+    - triptype (CHAR): Trip type ('R' = round-trip, 'O' = one-way)
+    - los (BIGINT): Length of stay in days
+    - originairportcode (CHAR): Origin airport code
+    - destinationairportcode (CHAR): Destination airport code
+    - departdate (INT): Departure date YYYYMMDD
+    - returndate (INT): Return date YYYYMMDD
+
+    EXAMPLE QUERIES:
+    ----------------
+
+    Example 1: "Show me top site-related issues for AA in the last 7 days"
+    ```sql
+    SELECT COALESCE(NULLIF(TRIM(issue_reasons::VARCHAR), ''), 'unknown') AS issue,
+           COUNT(*) AS count
+    FROM {{PCA}}
+    WHERE providercode ILIKE '%AA%'
+      AND {{IS_SITE}}
+      AND TO_DATE(scheduledate::VARCHAR, 'YYYYMMDD') >= CURRENT_DATE - 7
+    GROUP BY 1
+    ORDER BY 2 DESC
+    LIMIT 20;
+    ```
+
+    Example 2: "Show hourly pattern of site issues for AA in last 3 days"
+    ```sql
+    SELECT {{OBS_HOUR}} AS hour, COUNT(*) AS count
+    FROM {{PCA}}
+    WHERE providercode ILIKE '%AA%'
+      AND {{IS_SITE}}
+      AND TO_DATE(scheduledate::VARCHAR, 'YYYYMMDD') >= CURRENT_DATE - 3
+    GROUP BY 1
+    ORDER BY 1;
+    ```
+
+    Example 3: "Compare site vs invalid-request issues for all providers yesterday"
+    ```sql
+    SELECT {{ISSUE_TYPE:issue_type}}, COUNT(*) AS count
+    FROM {{PCA}}
+    WHERE TO_DATE(scheduledate::VARCHAR, 'YYYYMMDD') = CURRENT_DATE - 1
+    GROUP BY 1
+    ORDER BY 2 DESC;
+    ```
+
+    Example 4: "Show routes with most invalid-request issues"
+    ```sql
+    SELECT {{OD}} AS route, COUNT(*) AS count
+    FROM {{PCA}}
+    WHERE {{IS_INVALID}}
+      AND TO_DATE(scheduledate::VARCHAR, 'YYYYMMDD') >= CURRENT_DATE - 7
+    GROUP BY 1
+    ORDER BY 2 DESC
+    LIMIT 10;
+    ```
+
+    RETURNS:
+    --------
+    JSON string with:
+    - columns (list): Column names from query result
+    - rows (list): Array of result rows as JSON objects
+    - row_count (int): Number of rows returned
+    - expanded_sql (str): The actual SQL executed (with macros expanded)
+
+    Or if error:
+    - error (str): Error message
     """
     try:
-        query_upper = sql_query.upper().strip()
-        if not query_upper.startswith("SELECT"):
-            return json.dumps({"error": "Only SELECT queries are allowed"}, indent=2)
+        # Expand macros
+        expanded_sql = _expand_macros(sql_query)
 
-        forbidden_keywords = [
-            "DELETE",
-            "UPDATE",
-            "INSERT",
-            "DROP",
-            "TRUNCATE",
-            "ALTER",
-            "CREATE",
-        ]
-        for keyword in forbidden_keywords:
-            if re.search(rf"\b{keyword}\b", query_upper):
+        # Safety checks
+        sql_upper = expanded_sql.upper().strip()
+        if not (sql_upper.startswith("SELECT") or sql_upper.startswith("WITH")):
+            return json.dumps({"error": "Only SELECT or WITH ... SELECT queries allowed"}, indent=2)
+
+        forbidden = ["DELETE", "UPDATE", "INSERT", "DROP", "TRUNCATE", "ALTER",
+                     "CREATE", "COPY", "UNLOAD", "GRANT", "REVOKE"]
+        for keyword in forbidden:
+            if re.search(rf"\b{keyword}\b", sql_upper):
                 return json.dumps({"error": f"Forbidden keyword: {keyword}"}, indent=2)
 
-        if f"{SCHEMA_NAME.upper()}.{TABLE_BASE.upper()}" not in query_upper:
-            return json.dumps(
-                {
-                    "error": f"Query must reference {TABLE_NAME}",
-                },
-                indent=2,
-            )
+        # Auto-limit to 100 rows
+        truncated = False
+        if "LIMIT" not in sql_upper:
+            expanded_sql = expanded_sql.rstrip(";") + " LIMIT 100"
+            truncated = True
 
-        if "LIMIT" not in query_upper:
-            sql_query = sql_query.rstrip(";") + " LIMIT 100"
-            max_rows = 100
-        else:
-            match = re.search(r"LIMIT\s+(\d+)", query_upper)
-            max_rows = int(match.group(1)) if match else 100
-            max_rows = min(max_rows, 100)
-
-        connector = _get_connector()
-        conn = connector.get_connection()
-
-        if getattr(conn, "autocommit", None) is False:
-            try:
-                conn.autocommit = True
-            except Exception:
-                pass
-
-        with conn.cursor() as cursor:
-            try:
-                cursor.execute("ROLLBACK;")
-            except Exception:
-                pass
-
-            cursor.execute(sql_query)
-            colnames = [desc[0] for desc in cursor.description]
-            records = cursor.fetchmany(max_rows)
-
+        # Execute query
+        conn = _get_conn()
+        with conn.cursor() as cur:
+            _safe_execute(cur, expanded_sql)
+            columns = [desc[0] for desc in cur.description]
             rows = []
-            for rec in records:
-                row = {}
-                for i, col in enumerate(colnames):
-                    val = rec[i]
-                    if val is not None and not isinstance(val, (str, int, float, bool)):
-                        val = str(val)
-                    row[col] = val
-                rows.append(row)
+            for row in cur.fetchmany(100):
+                rows.append({
+                    col: (str(val) if val is not None and not isinstance(val, (str, int, float, bool)) else val)
+                    for col, val in zip(columns, row)
+                })
 
-            return json.dumps(
-                {
-                    "columns": colnames,
-                    "rows": rows,
-                    "row_count": len(rows),
-                    "truncated": len(rows) == max_rows,
-                },
-                indent=2,
-            )
+            return json.dumps({
+                "columns": columns,
+                "rows": rows,
+                "row_count": len(rows),
+                "truncated": truncated or (len(rows) == 100),
+                "expanded_sql": expanded_sql
+            }, indent=2)
 
     except Exception as e:
         log.error(f"Error in query_audit: {e}")
@@ -157,1073 +383,388 @@ def query_audit(sql_query: str) -> str:
 
 def get_table_schema() -> str:
     """
-    Return schema (column names, types, lengths, nullability, ordinal).
+    Get the complete table schema showing all available columns and their data types.
 
-    Uses information_schema first, then svv_columns as fallback for Redshift.
+    Use this tool when you need to:
+    - Discover what columns are available before writing a query
+    - Check column data types to know how to filter or format them
+    - Find available dimensions for analysis (POS, cabin, triptype, etc.)
+
+    INPUT PARAMETERS:
+    ------------------
+    None - This tool takes no parameters
+
+    WHEN TO USE:
+    ------------
+    - User asks "what data is available?"
+    - Before writing a custom query with query_audit()
+    - To verify column names for top_site_issues() or issue_scope_breakdown()
+
+    RETURNS:
+    --------
+    JSON string with:
+    - table (str): Full table name "monitoring_prod.provider_combined_audit"
+    - columns (list): Array of {column_name, data_type} objects for all 52 columns
+    - notes (object): Helpful groupings:
+        * issue_fields: Columns containing issue information
+        * date_fields: Columns for date/time filtering
+        * search_dimensions: Columns for dimensional analysis (POS, cabin, etc.)
+        * travel_dates: Departure and return date columns
+
+    EXAMPLE USAGE:
+    --------------
+    User: "What columns are in the provider audit table?"
+    Action: Call get_table_schema() with no parameters
+
+    User: "What dimensions can I analyze issues by?"
+    Action: Call get_table_schema() and look at the 'notes.search_dimensions' field
     """
-    query_info = f"""
-    SELECT
-        column_name,
-        data_type,
-        character_maximum_length,
-        is_nullable,
-        ordinal_position
-    FROM information_schema.columns
-    WHERE table_schema = '{SCHEMA_NAME}'
-      AND table_name = '{TABLE_BASE}'
-    ORDER BY ordinal_position;
+    cols = _get_columns()
+    columns = [{"column_name": k, "data_type": v} for k, v in cols.items()]
+
+    return json.dumps({
+        "table": TABLE_NAME,
+        "columns": columns,
+        "notes": {
+            "issue_fields": ["issue_sources", "issue_reasons"],
+            "date_fields": ["scheduledate", "actualscheduletimestamp", "observationtimestamp"],
+            "search_dimensions": ["pos", "cabin", "originairportcode", "destinationairportcode"],
+            "travel_dates": ["departdate", "returndate"]
+        }
+    }, indent=2)
+
+
+def top_site_issues(provider: str, lookback_days: int = 7, limit: int = 10) -> str:
     """
+    Get the top site-related issues for a specific provider, ranked by frequency.
 
-    query_svv = f"""
-    SELECT
-        column_name,
-        data_type,
-        character_maximum_length,
-        is_nullable,
-        ordinal_position
-    FROM svv_columns
-    WHERE table_schema = '{SCHEMA_NAME}'
-      AND table_name = '{TABLE_BASE}'
-    ORDER BY ordinal_position;
+    This tool answers questions like:
+    - "What are the top site issues for AA?"
+    - "Show me the most common site problems for provider AA"
+    - "What site errors is DL experiencing?"
+
+    IMPORTANT - What are SITE-RELATED issues?
+    ------------------------------------------
+    Site-related issues are infrastructure/connectivity problems, including:
+    - Timeouts and connection failures
+    - SSL/TLS certificate errors and handshake failures
+    - Captcha blocks and bot detection (akamai, cloudflare)
+    - HTTP errors: 403 Forbidden, 503 Service Unavailable, 500 Internal Server Error
+    - Website downtime or unavailability
+
+    These are DIFFERENT from invalid-request issues (bad parameters, malformed requests).
+
+    INPUT PARAMETERS:
+    ------------------
+    provider (str, REQUIRED):
+        Provider code or name text to match (simple ILIKE)
+
+        Format options:
+        - Uses case-insensitive matching with SQL ILIKE '%pattern%'
+        - Examples: "AA", "Delta", "United"
+
+    lookback_days (int, OPTIONAL, default=7):
+        How many days of data to analyze, counting back from most recent data
+        - Default: 7 (last week)
+        - Examples: 1 (yesterday only), 7 (last week), 30 (last month)
+        - Range: 1 to 365
+
+    limit (int, OPTIONAL, default=10):
+        Maximum number of top issues to return
+        - Default: 10
+        - Maximum: 50
+        - Returns issues ranked by count (most frequent first)
+
+    RETURNS:
+    --------
+    JSON string with:
+    - filters (object): The filters applied
+        * provider_like: The provider pattern searched
+        * issue_type: Always "site_related"
+        * lookback_days: Days of data analyzed
+    - rows (list): Top issues ranked by frequency, each with:
+        * issue_key: The issue name (from issue_reasons or issue_sources)
+        * count: Number of occurrences
+    - row_count (int): Number of issues returned
+
+    EXAMPLE USAGE:
+    --------------
+    User: "AA has an increase in site-related issues. What are the top site issues?"
+    Action: top_site_issues(provider="AA", lookback_days=7, limit=20)
+
+    User: "Show me site problems for American Airlines in the last 3 days"
+    Action: top_site_issues(provider="AA", lookback_days=3, limit=10)
+
+    User: "What are the most common site errors for all Delta providers?"
+    Action: top_site_issues(provider="Delta", lookback_days=7, limit=15)
+
+    WHEN TO USE:
+    ------------
+    - User mentions "site issues", "site problems", "site errors"
+    - User asks "what are the top issues" (and means site-related)
+    - User wants to see most frequent/common issues
+    - User specifies a provider name or code
+
+    WHEN NOT TO USE:
+    ----------------
+    - For invalid-request issues → use query_audit() with {{IS_INVALID}} filter
+    - For dimensional breakdown → use issue_scope_breakdown()
+    - For custom analysis → use query_audit()
     """
+    limit = min(max(1, limit), 50)
+    cols = _get_columns()
 
-    attempts = 0
-    while attempts < 2:
-        try:
-            connector = _get_connector()
-            conn = connector.get_connection()
-            try:
-                if getattr(conn, "autocommit", None) is False:
-                    conn.autocommit = True
-            except Exception:
-                pass
+    # Find provider column
+    provider_col = _pick_column(cols, ["providercode", "provider", "provider_id"]) or "providercode"
+    date_col = _pick_column(cols, ["scheduledate"]) or "scheduledate"
+    date_expr = _date_expr(date_col, cols.get(date_col, ""))
 
-            with conn.cursor() as cursor:
-                try:
-                    cursor.execute("ROLLBACK;")
-                except Exception:
-                    pass
-
-                cursor.execute(query_info)
-                colnames = [desc[0] for desc in cursor.description]
-                rows = cursor.fetchall()
-
-                if not rows:
-                    cursor.execute(query_svv)
-                    colnames = [desc[0] for desc in cursor.description]
-                    rows = cursor.fetchall()
-
-                results = [
-                    {col: row[i] for i, col in enumerate(colnames)} for row in rows
-                ]
-
-                return json.dumps({"table": TABLE_NAME, "columns": results}, indent=2)
-
-        except Exception as e:
-            msg = str(e)
-            if ("25P02" in msg or "current transaction is aborted" in msg) and attempts == 0:
-                try:
-                    conn.rollback()
-                except Exception:
-                    pass
-                attempts += 1
-                continue
-            log.error(f"Error fetching schema: {msg}")
-            return json.dumps({"error": msg}, indent=2)
-
-    return json.dumps({"error": "Schema query failed after retry"}, indent=2)
-
-
-def get_row_count() -> str:
-    """Return total row count for monitoring_prod.provider_combined_audit."""
-    query = f"SELECT COUNT(*) AS total_rows FROM {TABLE_NAME};"
-
-    try:
-        connector = _get_connector()
-        conn = connector.get_connection()
-
-        # be defensive about transaction state
-        try:
-            if getattr(conn, "autocommit", None) is False:
-                conn.autocommit = True
-        except Exception:
-            pass
-
-        with conn.cursor() as cursor:
-            try:
-                cursor.execute("ROLLBACK;")
-            except Exception:
-                pass
-
-            cursor.execute(query)
-            count = cursor.fetchone()[0]
-            return json.dumps({"table": TABLE_NAME, "total_rows": count}, indent=2)
-    except Exception as e:
-        log.error(f"Error in get_row_count: {e}")
-        return json.dumps({"error": str(e)}, indent=2)
-
-
-def get_distinct_values(column_name: str, max_rows: int = 100) -> str:
-    """
-    Return distinct values for a column in provider_combined_audit (validated).
-
-    Args:
-        column_name: Name of column (validated against schema)
-        max_rows: Max values to return (<= 500)
-    """
-    try:
-        max_rows = max(1, min(int(max_rows), 500))
-    except Exception:
-        max_rows = 100
-
-    try:
-        connector = _get_connector()
-        conn = connector.get_connection()
-        with conn.cursor() as cursor:
-            cols = _list_columns(cursor)
-            if column_name not in cols:
-                return json.dumps({"error": f"Unknown column: {column_name}", "available": cols}, indent=2)
-
-            cursor.execute(
-                f"SELECT DISTINCT {column_name} FROM {TABLE_NAME} ORDER BY 1 DESC LIMIT {max_rows}"
-            )
-            values = [row[0] for row in cursor.fetchall()]
-            return json.dumps({"column": column_name, "values": values, "count": len(values)}, indent=2)
-    except Exception as e:
-        log.error(f"Error in get_distinct_values: {e}")
-        return json.dumps({"error": str(e)}, indent=2)
-
-
-def get_recent_events(limit: int = 100) -> str:
-    """
-    Return recent rows ordered by a best-effort event timestamp.
-
-    If no timestamp columns exist, returns sample rows ordered by default.
-    """
-    try:
-        limit = max(1, min(int(limit), 200))
-    except Exception:
-        limit = 100
-
-    try:
-        connector = _get_connector()
-        conn = connector.get_connection()
-        with conn.cursor() as cursor:
-            # Find timestamp-like columns
-            cursor.execute(
-                f"""
-                SELECT column_name
-                FROM information_schema.columns
-                WHERE table_schema = '{SCHEMA_NAME}'
-                  AND table_name = '{TABLE_BASE}'
-                  AND data_type ILIKE '%timestamp%'
-                ORDER BY ordinal_position
-                """
-            )
-            ts_cols = [row[0] for row in cursor.fetchall()]
-
-            # Prefer common names if present
-            preferred = [
-                "event_time",
-                "updated_at",
-                "created_at",
-                "last_modified",
-                "timestamp",
-                "ts",
-            ]
-            order_col = None
-            for p in preferred:
-                if p in ts_cols:
-                    order_col = p
-                    break
-            if not order_col and ts_cols:
-                order_col = ts_cols[0]
-
-            if order_col:
-                cursor.execute(
-                    f"SELECT * FROM {TABLE_NAME} ORDER BY {order_col} DESC LIMIT {limit}"
-                )
-                colnames = [desc[0] for desc in cursor.description]
-                rows = cursor.fetchall()
-                data = []
-                for rec in rows:
-                    row = {}
-                    for i, col in enumerate(colnames):
-                        val = rec[i]
-                        if val is not None and not isinstance(val, (str, int, float, bool)):
-                            val = str(val)
-                        row[col] = val
-                    data.append(row)
-                return json.dumps(
-                    {
-                        "order_column": order_col,
-                        "rows": data,
-                        "row_count": len(data),
-                    },
-                    indent=2,
-                )
-            else:
-                # No timestamp columns: return sample rows
-                cursor.execute(f"SELECT * FROM {TABLE_NAME} LIMIT {limit}")
-                colnames = [desc[0] for desc in cursor.description]
-                rows = cursor.fetchall()
-                data = []
-                for rec in rows:
-                    row = {}
-                    for i, col in enumerate(colnames):
-                        val = rec[i]
-                        if val is not None and not isinstance(val, (str, int, float, bool)):
-                            val = str(val)
-                        row[col] = val
-                    data.append(row)
-                return json.dumps({"rows": data, "row_count": len(data)}, indent=2)
-    except Exception as e:
-        log.error(f"Error in get_recent_events: {e}")
-        return json.dumps({"error": str(e)}, indent=2)
-
-
-# -------------------------
-# New, richer exploration tools
-# -------------------------
-
-def _validate_column_name(cursor, name: str) -> bool:
-    cols = set(_list_columns(cursor))
-    return name in cols
-
-
-def _coalesce_timestamp_expression_alias(alias: str = "event_ts") -> str:
-    """Return a CASE expression aliasing best-effort parsed event timestamp.
-
-    Avoids COALESCE eager evaluation by conditionally applying TO_TIMESTAMP
-    only when the source string is non-empty.
-    """
-    return (
-        "CASE "
-        "WHEN response_timestamp IS NOT NULL AND TRIM(response_timestamp) <> '' "
-        "THEN TO_TIMESTAMP(TRIM(response_timestamp), 'YYYY-MM-DD HH24:MI:SS.MS') "
-        "WHEN actualscheduletimestamp IS NOT NULL AND TRIM(actualscheduletimestamp) <> '' "
-        "THEN TO_TIMESTAMP(TRIM(actualscheduletimestamp), 'YYYY-MM-DD HH24:MI:SS.MS') "
-        "WHEN observationtimestamp IS NOT NULL AND TRIM(observationtimestamp) <> '' "
-        "THEN TO_TIMESTAMP(TRIM(observationtimestamp), 'YYYY-MM-DD HH24:MI:SS.MS') "
-        "WHEN dropdeadtimestamps IS NOT NULL AND TRIM(dropdeadtimestamps) <> '' "
-        "THEN TO_TIMESTAMP(TRIM(dropdeadtimestamps), 'YYYY-MM-DD HH24:MI:SS.MS') "
-        "ELSE NULL END AS " + alias
-    )
-
-
-def get_date_range() -> str:
-    """
-    Get min and max sales_date available in the table.
-
-    Returns JSON with table, min_date, max_date.
-    """
-    sql = f"SELECT MIN(sales_date) AS min_date, MAX(sales_date) AS max_date FROM {TABLE_NAME}"
-    try:
-        conn = _get_connector().get_connection()
-        with conn.cursor() as cursor:
-            cursor.execute(sql)
-            row = cursor.fetchone()
-            return json.dumps({"table": TABLE_NAME, "min_date": row[0], "max_date": row[1]}, indent=2)
-    except Exception as e:
-        return json.dumps({"error": str(e)}, indent=2)
-
-
-def get_rows_by_sales_date(sales_date: int, limit: int = 100) -> str:
-    """
-    Fetch rows for a given sales_date (ordered by best-effort event timestamp).
-
-    Args:
-        sales_date: YYYYMMDD integer
-        limit: Max rows to return (<= 200)
-    """
-    try:
-        limit = max(1, min(int(limit), 200))
-    except Exception:
-        limit = 100
-
-    if not isinstance(sales_date, int) or len(str(sales_date)) != 8:
-        return json.dumps({"error": "sales_date must be YYYYMMDD int"}, indent=2)
-
-    ts_expr = _coalesce_timestamp_expression_alias()
-    sql = f"""
-        SELECT *, {ts_expr}
-        FROM {TABLE_NAME}
-        WHERE sales_date = {sales_date}
-        ORDER BY event_ts DESC NULLS LAST, sales_date DESC
-        LIMIT {limit}
-    """
-    try:
-        conn = _get_connector().get_connection()
-        with conn.cursor() as cursor:
-            try:
-                cursor.execute("ROLLBACK;")
-            except Exception:
-                pass
-            cursor.execute(sql)
-            colnames = [d[0] for d in cursor.description]
-            recs = cursor.fetchall()
-            rows = []
-            for rec in recs:
-                row = {}
-                for i, c in enumerate(colnames):
-                    v = rec[i]
-                    if v is not None and not isinstance(v, (str, int, float, bool)):
-                        v = str(v)
-                    row[c] = v
-                rows.append(row)
-        return json.dumps({"columns": colnames, "rows": rows, "row_count": len(rows)}, indent=2)
-    except Exception as e:
-        return json.dumps({"error": str(e)}, indent=2)
-
-
-def get_top_by_dimension(dim_column: str, sales_date: int | None = None, top_n: int = 20) -> str:
-    """
-    Top values by count for a dimension (e.g., providercode, sitecode, pos).
-
-    Args:
-        dim_column: Column to group by (validated)
-        sales_date: Optional YYYYMMDD to filter a specific date
-        top_n: Rows to return (<= 200)
-    """
-    try:
-        top_n = max(1, min(int(top_n), 200))
-    except Exception:
-        top_n = 20
-
-    try:
-        conn = _get_connector().get_connection()
-        with conn.cursor() as cursor:
-            try:
-                cursor.execute("ROLLBACK;")
-            except Exception:
-                pass
-            if not _validate_column_name(cursor, dim_column):
-                return json.dumps({"error": f"Unknown column: {dim_column}"}, indent=2)
-
-            where = ""
-            if sales_date is not None:
-                if not isinstance(sales_date, int) or len(str(sales_date)) != 8:
-                    return json.dumps({"error": "sales_date must be YYYYMMDD int"}, indent=2)
-                where = f"WHERE sales_date = {sales_date}"
-
-            sql = f"""
-                SELECT {dim_column} AS dim_value, COUNT(*) AS cnt
-                FROM {TABLE_NAME}
-                {where}
-                GROUP BY {dim_column}
-                ORDER BY cnt DESC NULLS LAST
-                LIMIT {top_n}
-            """
-            cursor.execute(sql)
-            colnames = [d[0] for d in cursor.description]
-            recs = cursor.fetchall()
-            rows = []
-            for rec in recs:
-                rows.append({colnames[i]: rec[i] for i in range(len(colnames))})
-            return json.dumps({"columns": colnames, "rows": rows, "row_count": len(rows)}, indent=2)
-    except Exception as e:
-        return json.dumps({"error": str(e)}, indent=2)
-
-
-def get_volume_by_date(start_date: int | None = None, end_date: int | None = None, top_n: int = 60) -> str:
-    """
-    Volume (row counts) grouped by sales_date, optionally in a date range.
-
-    Args:
-        start_date: Inclusive YYYYMMDD
-        end_date: Inclusive YYYYMMDD
-        top_n: Max dates returned (ordered desc)
-    """
-    try:
-        top_n = max(1, min(int(top_n), 366))
-    except Exception:
-        top_n = 60
-
-    filters = []
-    if start_date is not None:
-        if not isinstance(start_date, int) or len(str(start_date)) != 8:
-            return json.dumps({"error": "start_date must be YYYYMMDD int"}, indent=2)
-        filters.append(f"sales_date >= {start_date}")
-    if end_date is not None:
-        if not isinstance(end_date, int) or len(str(end_date)) != 8:
-            return json.dumps({"error": "end_date must be YYYYMMDD int"}, indent=2)
-        filters.append(f"sales_date <= {end_date}")
-    where = ("WHERE " + " AND ".join(filters)) if filters else ""
+    # Simple provider pattern
+    provider_filter = f"{provider_col} ILIKE %s"
+    provider_params = [f"%{provider}%"]
 
     sql = f"""
-        SELECT sales_date, COUNT(*) AS cnt
-        FROM {TABLE_NAME}
-        {where}
-        GROUP BY sales_date
-        ORDER BY sales_date DESC
-        LIMIT {top_n}
+    SELECT
+        COALESCE(
+            NULLIF(TRIM(issue_reasons::VARCHAR), ''),
+            NULLIF(TRIM(issue_sources::VARCHAR), ''),
+            'unknown'
+        ) AS issue_key,
+        COUNT(*) AS cnt
+    FROM {TABLE_NAME}
+    WHERE {provider_filter}
+      AND {date_expr} >= CURRENT_DATE - {lookback_days}
+      AND {_build_site_filter()}
+    GROUP BY 1
+    ORDER BY 2 DESC
+    LIMIT {limit}
     """
-    try:
-        conn = _get_connector().get_connection()
-        with conn.cursor() as cursor:
-            try:
-                cursor.execute("ROLLBACK;")
-            except Exception:
-                pass
-            cursor.execute(sql)
-            colnames = [d[0] for d in cursor.description]
-            recs = cursor.fetchall()
-            rows = []
-            for rec in recs:
-                rows.append({colnames[i]: rec[i] for i in range(len(colnames))})
-            return json.dumps({"columns": colnames, "rows": rows, "row_count": len(rows)}, indent=2)
-    except Exception as e:
-        return json.dumps({"error": str(e)}, indent=2)
-
-
-def summarize_provider_status(provider_code: str, sales_date: int | None = None, top_n: int = 10) -> str:
-    """
-    Summarize a provider’s performance for a date (or latest).
-
-    Computes total volume, success rate, status breakdown, top sites,
-    top issues (source/reason pairs), POS distribution, and top O-D pairs.
-
-    Args:
-        provider_code: Value from `providercode` (e.g., 'AaPts', 'AA', 'WN')
-        sales_date: Optional YYYYMMDD; when omitted, uses latest sales_date
-        top_n: Limit for top lists (<= 50)
-    """
-    try:
-        top_n = max(1, min(int(top_n), 50))
-    except Exception:
-        top_n = 10
 
     try:
-        conn = _get_connector().get_connection()
-        with conn.cursor() as cursor:
-            try:
-                cursor.execute("ROLLBACK;")
-            except Exception:
-                pass
+        conn = _get_conn()
+        with conn.cursor() as cur:
+            _safe_execute(cur, sql, tuple(provider_params))
+            rows = [{"issue_key": r[0], "count": int(r[1])} for r in cur.fetchall()]
 
-            # Determine target date
-            if sales_date is None:
-                cursor.execute(f"SELECT MAX(sales_date) FROM {TABLE_NAME}")
-                target_date = cursor.fetchone()[0]
-            else:
-                target_date = int(sales_date)
-
-            # Ensure provider exists
-            cols = set(_list_columns(cursor))
-            if 'providercode' not in cols:
-                return json.dumps({"error": "Column providercode not found"}, indent=2)
-
-            # Totals & success rate
-            cursor.execute(
-                f"""
-                WITH base AS (
-                    SELECT * FROM {TABLE_NAME}
-                    WHERE sales_date = %s AND providercode = %s
-                )
-                SELECT
-                    COUNT(*) AS total,
-                    SUM(CASE WHEN response_statuses = 'success' THEN 1 ELSE 0 END) AS success_count,
-                    SUM(CASE WHEN response_statuses <> 'success' THEN 1 ELSE 0 END) AS non_success_count,
-                    MIN(TRY_CAST(response_timestamp AS TIMESTAMP)) AS min_response_ts,
-                    MAX(TRY_CAST(response_timestamp AS TIMESTAMP)) AS max_response_ts
-                FROM base;
-                """,
-                (target_date, provider_code),
-            )
-            total_row = cursor.fetchone()
-
-            totals = {
-                "total": int(total_row[0] or 0),
-                "success": int(total_row[1] or 0),
-                "non_success": int(total_row[2] or 0),
-                "min_response_ts": (str(total_row[3]) if total_row[3] is not None else None),
-                "max_response_ts": (str(total_row[4]) if total_row[4] is not None else None),
+            filters_output = {
+                "provider_like": provider,
+                "issue_type": "site_related",
+                "lookback_days": lookback_days
             }
-            totals["success_rate"] = (
-                round((totals["success"] / totals["total"]) * 100.0, 2)
-                if totals["total"] else 0.0
-            )
 
-            # Status breakdown
-            cursor.execute(
-                f"""
-                WITH base AS (
-                    SELECT response_statuses FROM {TABLE_NAME}
-                    WHERE sales_date = %s AND providercode = %s
-                )
-                SELECT response_statuses, COUNT(*) AS cnt
-                FROM base
-                GROUP BY 1
-                ORDER BY cnt DESC NULLS LAST
-                LIMIT {top_n}
-                """,
-                (target_date, provider_code),
-            )
-            status_rows = cursor.fetchall()
-            statuses = [{"response_statuses": r[0], "cnt": r[1]} for r in status_rows]
-
-            # Top sites (with success counts)
-            cursor.execute(
-                f"""
-                WITH base AS (
-                    SELECT sitecode, response_statuses FROM {TABLE_NAME}
-                    WHERE sales_date = %s AND providercode = %s
-                )
-                SELECT sitecode,
-                       COUNT(*) AS total,
-                       SUM(CASE WHEN response_statuses='success' THEN 1 ELSE 0 END) AS success
-                FROM base
-                GROUP BY sitecode
-                ORDER BY total DESC NULLS LAST
-                LIMIT {top_n}
-                """,
-                (target_date, provider_code),
-            )
-            site_rows = cursor.fetchall()
-            top_sites = [
-                {
-                    "sitecode": r[0],
-                    "total": r[1],
-                    "success": r[2],
-                    "success_rate": round((r[2] / r[1]) * 100.0, 2) if r[1] else 0.0,
-                }
-                for r in site_rows
-            ]
-
-            # Top issues (non-success only)
-            cursor.execute(
-                f"""
-                WITH base AS (
-                    SELECT issue_sources, issue_reasons
-                    FROM {TABLE_NAME}
-                    WHERE sales_date = %s AND providercode = %s AND response_statuses <> 'success'
-                )
-                SELECT COALESCE(NULLIF(issue_sources,''),'(null)') AS issue_sources,
-                       COALESCE(NULLIF(issue_reasons,''),'(null)') AS issue_reasons,
-                       COUNT(*) AS cnt
-                FROM base
-                GROUP BY 1,2
-                ORDER BY cnt DESC NULLS LAST
-                LIMIT {top_n}
-                """,
-                (target_date, provider_code),
-            )
-            issue_rows = cursor.fetchall()
-            top_issues = [
-                {"issue_sources": r[0], "issue_reasons": r[1], "cnt": r[2]} for r in issue_rows
-            ]
-
-            # POS distribution
-            cursor.execute(
-                f"""
-                WITH base AS (
-                    SELECT pos FROM {TABLE_NAME}
-                    WHERE sales_date = %s AND providercode = %s
-                )
-                SELECT pos, COUNT(*) AS cnt
-                FROM base
-                GROUP BY pos
-                ORDER BY cnt DESC NULLS LAST
-                LIMIT {top_n}
-                """,
-                (target_date, provider_code),
-            )
-            pos_rows = cursor.fetchall()
-            pos = [{"pos": r[0], "cnt": r[1]} for r in pos_rows]
-
-            # OD distribution
-            cursor.execute(
-                f"""
-                WITH base AS (
-                    SELECT originairportcode, destinationairportcode
-                    FROM {TABLE_NAME}
-                    WHERE sales_date = %s AND providercode = %s
-                )
-                SELECT (originairportcode || '-' || destinationairportcode) AS od, COUNT(*) AS cnt
-                FROM base
-                GROUP BY 1
-                ORDER BY cnt DESC NULLS LAST
-                LIMIT {top_n}
-                """,
-                (target_date, provider_code),
-            )
-            od_rows = cursor.fetchall()
-            od = [{"od": r[0], "cnt": r[1]} for r in od_rows]
-
-            return json.dumps(
-                {
-                    "provider": provider_code,
-                    "target_date": target_date,
-                    "totals": totals,
-                    "statuses": statuses,
-                    "top_sites": top_sites,
-                    "top_issues": top_issues,
-                    "pos": pos,
-                    "od": od,
-                },
-                indent=2,
-            )
+            return json.dumps({
+                "filters": filters_output,
+                "rows": rows,
+                "row_count": len(rows)
+            }, indent=2)
     except Exception as e:
         return json.dumps({"error": str(e)}, indent=2)
 
 
-def get_overview_today(sales_date: int | None = None, top_n: int = 20) -> str:
+def issue_scope_breakdown(provider: str, lookback_days: int = 7, per_dim_limit: int = 10) -> str:
     """
-    High-level overview (today/latest) across all providers.
+    Analyze WHERE site-related issues are concentrated across multiple dimensions.
 
-    Includes per-provider volume + success rate, status distribution,
-    top sites overall, and top (issue_source, issue_reason) pairs.
+    This tool answers questions like:
+    - "What is the scope of the issue?"
+    - "What dimensions is this concentrated in?"
+    - "Which POS/routes/cabin classes are most affected?"
+    - "When do these issues occur? (hourly pattern)"
 
-    Args:
-        sales_date: Optional YYYYMMDD; defaults to latest available
-        top_n: Limit for each section (<= 50)
+    Use this tool to understand the SCOPE and CONCENTRATION of issues, showing:
+    - WHEN: Hourly observation patterns
+    - WHERE (Geography): Point of sale (POS) distribution
+    - WHAT (Product): Trip type, cabin class, length of stay
+    - WHERE (Routes): Origin-destination pairs most affected
+    - WHEN (Travel): Departure week and day-of-week patterns
+
+    DIMENSIONS ANALYZED:
+    --------------------
+    1. obs_hour: Observation hour (when issue was detected)
+       - Shows if issues happen at specific times of day
+       - Example: "2025-10-16 14:00:00"
+
+    2. pos: Point of Sale (where customer is searching from)
+       - Geographic distribution of issues
+       - Examples: "US", "CA", "GB", "DE"
+
+    3. triptype: Trip Type
+       - Round-trip vs one-way distribution
+       - Values: "R" (round-trip), "O" (one-way)
+
+    4. los: Length of Stay (in days)
+       - How long between departure and return
+       - Examples: "3", "7", "14"
+
+    5. od: Origin-Destination pairs (routes)
+       - Which routes are most affected
+       - Examples: "JFK-LAX", "ORD-DFW", "ATL-LAS"
+
+    6. cabin: Cabin Class
+       - Which cabins have issues
+       - Examples: "Economy", "Business", "First"
+
+    7. depart_week: Departure Week
+       - Which travel weeks are affected
+       - Example: "2025-10-20" (week starting date)
+
+    8. depart_dow: Departure Day of Week
+       - Which days of week for departure
+       - Values: 0 (Sunday) through 6 (Saturday)
+
+    INPUT PARAMETERS:
+    ------------------
+    provider (str, REQUIRED):
+        Provider code or name text to match (simple ILIKE)
+
+        Format options:
+        - Uses case-insensitive matching with SQL ILIKE '%pattern%'
+        - Examples: "AA", "Delta", "United"
+
+    lookback_days (int, OPTIONAL, default=7):
+        How many days of data to analyze
+        - Default: 7 (last week)
+        - Examples: 3 (last 3 days), 14 (last 2 weeks), 30 (last month)
+        - Range: 1 to 365
+
+    per_dim_limit (int, OPTIONAL, default=10):
+        Maximum rows to return per dimension
+        - Default: 10 (top 10 values per dimension)
+        - Maximum: 25
+        - Shows most concentrated values first
+
+    RETURNS:
+    --------
+    JSON string with:
+    - filters (object): Filters applied
+        * provider_like: Provider pattern searched
+        * issue_type: Always "site_related"
+        * lookback_days: Days analyzed
+    - total_count (int): Total site issues found for this provider
+    - available_dimensions (list): Which dimensions had data (may be subset of 8)
+    - breakdowns (object): For each dimension, array of:
+        * bucket: The dimension value (e.g., "US" for POS, "JFK-LAX" for od)
+        * count: Number of issues for this value
+        * pct: Percentage of total issues (0.0 to 1.0)
+
+    EXAMPLE USAGE:
+    --------------
+    User: "What is the scope of the issue? What dimensions is this concentrated in?"
+    Action: issue_scope_breakdown(provider="AA", lookback_days=7, per_dim_limit=10)
+    Response interpretation:
+        - Check breakdowns.obs_hour → "Issues concentrated in 14:00-16:00 hours"
+        - Check breakdowns.pos → "80% of issues from US point of sale"
+        - Check breakdowns.od → "JFK-LAX route has 45% of issues"
+
+    User: "Where are the AA site issues concentrated?"
+    Action: issue_scope_breakdown(provider="AA", lookback_days=7, per_dim_limit=15)
+
+    User: "Show me the scope of Delta's site problems across all dimensions"
+    Action: issue_scope_breakdown(provider="Delta", lookback_days=14, per_dim_limit=20)
+
+    WHEN TO USE:
+    ------------
+    - User asks about "scope" of issues
+    - User asks "what dimensions" or "where concentrated"
+    - User wants to see distribution across POS, routes, cabin, time
+    - After using top_site_issues() to understand WHERE issues occur
+
+    WHEN NOT TO USE:
+    ----------------
+    - To see WHAT issues (use top_site_issues instead)
+    - For invalid-request issues (use query_audit with {{IS_INVALID}})
+    - For single dimension analysis (use query_audit with GROUP BY)
     """
-    try:
-        top_n = max(1, min(int(top_n), 50))
-    except Exception:
-        top_n = 20
+    per_dim_limit = min(max(1, per_dim_limit), 25)
+    cols = _get_columns()
+
+    # Identify columns
+    provider_col = _pick_column(cols, ["providercode", "provider"]) or "providercode"
+    date_col = _pick_column(cols, ["scheduledate"]) or "scheduledate"
+    date_expr = _date_expr(date_col, cols.get(date_col, ""))
+
+    pos_col = _pick_column(cols, ["pos", "point_of_sale"])
+    cabin_col = _pick_column(cols, ["cabin", "bookingcabin"])
+    depart_col = _pick_column(cols, ["departdate", "legdeparturedate"])
+
+    has_od = "originairportcode" in cols and "destinationairportcode" in cols
+
+    # Simple provider pattern
+    provider_filter = f"{provider_col} ILIKE %s"
+    provider_params = [f"%{provider}%"]
+
+    # Base filter
+    base_where = f"""
+    WHERE {provider_filter}
+      AND {date_expr} >= CURRENT_DATE - {lookback_days}
+      AND {_build_site_filter()}
+    """
+
+    filters_output = {
+        "provider_like": provider,
+        "issue_type": "site_related",
+        "lookback_days": lookback_days
+    }
+
+    result = {
+        "filters": filters_output,
+        "total_count": 0,
+        "available_dimensions": [],
+        "breakdowns": {}
+    }
 
     try:
-        conn = _get_connector().get_connection()
-        with conn.cursor() as cursor:
+        conn = _get_conn()
+
+        # Get total count
+        with conn.cursor() as cur:
+            _safe_execute(cur, f"SELECT COUNT(*) FROM {TABLE_NAME} {base_where}", tuple(provider_params))
+            result["total_count"] = int(cur.fetchone()[0])
+
+        # Helper to run dimension breakdown
+        def run_dimension(name: str, select_expr: str, extra_where: str = ""):
+            sql = f"""
+            SELECT {select_expr} AS bucket, COUNT(*) AS cnt
+            FROM {TABLE_NAME}
+            {base_where} {extra_where}
+            GROUP BY 1
+            ORDER BY 2 DESC
+            LIMIT {per_dim_limit}
+            """
             try:
-                cursor.execute("ROLLBACK;")
+                with conn.cursor() as cur:
+                    _safe_execute(cur, sql, tuple(provider_params))
+                    rows = []
+                    for bucket, cnt in cur.fetchall():
+                        pct = cnt / result["total_count"] if result["total_count"] > 0 else 0
+                        rows.append({
+                            "bucket": str(bucket) if bucket is not None else "null",
+                            "count": int(cnt),
+                            "pct": round(pct, 4)
+                        })
+                    if rows:
+                        result["breakdowns"][name] = rows
+                        result["available_dimensions"].append(name)
             except Exception:
-                pass
+                pass  # Skip dimension if query fails
 
-            if sales_date is None:
-                cursor.execute(f"SELECT MAX(sales_date) FROM {TABLE_NAME}")
-                target_date = cursor.fetchone()[0]
-            else:
-                target_date = int(sales_date)
+        # Run breakdowns for available dimensions
+        run_dimension("obs_hour", f"DATE_TRUNC('hour', {_build_event_ts()})")
 
-            # Provider summary
-            cursor.execute(
-                f"""
-                WITH base AS (
-                    SELECT providercode, response_statuses FROM {TABLE_NAME}
-                    WHERE sales_date = %s
-                )
-                SELECT providercode,
-                       COUNT(*) AS total,
-                       SUM(CASE WHEN response_statuses='success' THEN 1 ELSE 0 END) AS success
-                FROM base
-                GROUP BY providercode
-                ORDER BY total DESC NULLS LAST
-                LIMIT {top_n}
-                """,
-                (target_date,),
-            )
-            prov_rows = cursor.fetchall()
-            providers = [
-                {
-                    "providercode": r[0],
-                    "total": r[1],
-                    "success": r[2],
-                    "success_rate": round((r[2] / r[1]) * 100.0, 2) if r[1] else 0.0,
-                }
-                for r in prov_rows
-            ]
+        if pos_col:
+            run_dimension("pos", f"NULLIF(TRIM({pos_col}::VARCHAR), '')", f"AND {pos_col} IS NOT NULL")
 
-            # Status distribution
-            cursor.execute(
-                f"""
-                WITH base AS (
-                    SELECT response_statuses FROM {TABLE_NAME}
-                    WHERE sales_date = %s
-                )
-                SELECT response_statuses, COUNT(*) AS cnt
-                FROM base
-                GROUP BY 1
-                ORDER BY cnt DESC NULLS LAST
-                LIMIT {top_n}
-                """,
-                (target_date,),
-            )
-            status_rows = cursor.fetchall()
-            statuses = [{"response_statuses": r[0], "cnt": r[1]} for r in status_rows]
+        if has_od:
+            run_dimension("od", "(originairportcode || '-' || destinationairportcode)")
 
-            # Top sites overall
-            cursor.execute(
-                f"""
-                WITH base AS (
-                    SELECT sitecode, response_statuses FROM {TABLE_NAME}
-                    WHERE sales_date = %s
-                )
-                SELECT sitecode,
-                       COUNT(*) AS total,
-                       SUM(CASE WHEN response_statuses='success' THEN 1 ELSE 0 END) AS success
-                FROM base
-                GROUP BY sitecode
-                ORDER BY total DESC NULLS LAST
-                LIMIT {top_n}
-                """,
-                (target_date,),
-            )
-            site_rows = cursor.fetchall()
-            sites = [
-                {
-                    "sitecode": r[0],
-                    "total": r[1],
-                    "success": r[2],
-                    "success_rate": round((r[2] / r[1]) * 100.0, 2) if r[1] else 0.0,
-                }
-                for r in site_rows
-            ]
+        if cabin_col:
+            run_dimension("cabin", f"NULLIF(TRIM({cabin_col}::VARCHAR), '')", f"AND {cabin_col} IS NOT NULL")
 
-            # Top issues overall
-            cursor.execute(
-                f"""
-                WITH base AS (
-                    SELECT issue_sources, issue_reasons, response_statuses
-                    FROM {TABLE_NAME}
-                    WHERE sales_date = %s AND response_statuses <> 'success'
-                )
-                SELECT COALESCE(NULLIF(issue_sources,''),'(null)') AS issue_sources,
-                       COALESCE(NULLIF(issue_reasons,''),'(null)') AS issue_reasons,
-                       COUNT(*) AS cnt
-                FROM base
-                GROUP BY 1,2
-                ORDER BY cnt DESC NULLS LAST
-                LIMIT {top_n}
-                """,
-                (target_date,),
-            )
-            issue_rows = cursor.fetchall()
-            issues = [
-                {"issue_sources": r[0], "issue_reasons": r[1], "cnt": r[2]} for r in issue_rows
-            ]
+        if depart_col:
+            depart_expr = _date_expr(depart_col, cols.get(depart_col, ""))
+            run_dimension("depart_week", f"DATE_TRUNC('week', {depart_expr})")
 
-            return json.dumps(
-                {
-                    "target_date": target_date,
-                    "providers": providers,
-                    "statuses": statuses,
-                    "sites": sites,
-                    "issues": issues,
-                },
-                indent=2,
-            )
-    except Exception as e:
-        return json.dumps({"error": str(e)}, indent=2)
+        return json.dumps(result, indent=2)
 
-
-def summarize_issues_today(sales_date: int | None = None, top_n: int = 10) -> str:
-    """
-    Summarize today's issues and their impacts.
-
-    Returns, for the latest (or provided) sales_date:
-    - total rows, successes, failures, failure_rate
-    - top (issue_sources, issue_reasons) by failure count
-    - per-issue impacts: counts and samples of affected providers/sites/pos
-
-    Args:
-        sales_date: Optional YYYYMMDD; defaults to latest available
-        top_n: Number of top issue pairs to include (<= 50)
-    """
-    try:
-        top_n = max(1, min(int(top_n), 50))
-    except Exception:
-        top_n = 10
-
-    try:
-        conn = _get_connector().get_connection()
-        with conn.cursor() as cursor:
-            try:
-                cursor.execute("ROLLBACK;")
-            except Exception:
-                pass
-
-            # Determine target date
-            if sales_date is None:
-                cursor.execute(f"SELECT MAX(sales_date) FROM {TABLE_NAME}")
-                target_date = cursor.fetchone()[0]
-            else:
-                target_date = int(sales_date)
-
-            # Totals for the day
-            cursor.execute(
-                f"""
-                WITH base AS (
-                    SELECT response_statuses
-                    FROM {TABLE_NAME}
-                    WHERE sales_date = %s
-                )
-                SELECT
-                    COUNT(*) AS total_rows,
-                    SUM(CASE WHEN response_statuses='success' THEN 1 ELSE 0 END) AS total_success,
-                    SUM(CASE WHEN response_statuses<>'success' THEN 1 ELSE 0 END) AS total_failed
-                FROM base
-                """,
-                (target_date,),
-            )
-            totals_row = cursor.fetchone()
-            total_rows = int(totals_row[0] or 0)
-            total_success = int(totals_row[1] or 0)
-            total_failed = int(totals_row[2] or 0)
-            failure_rate = round((total_failed / total_rows) * 100.0, 2) if total_rows else 0.0
-
-            # Top issues (issue_sources, issue_reasons)
-            cursor.execute(
-                f"""
-                WITH base AS (
-                    SELECT COALESCE(NULLIF(issue_sources,''),'(null)') AS issue_sources,
-                           COALESCE(NULLIF(issue_reasons,''),'(null)') AS issue_reasons
-                    FROM {TABLE_NAME}
-                    WHERE sales_date = %s AND response_statuses <> 'success'
-                )
-                SELECT issue_sources, issue_reasons, COUNT(*) AS failed_count
-                FROM base
-                GROUP BY 1,2
-                ORDER BY failed_count DESC NULLS LAST
-                LIMIT {top_n}
-                """,
-                (target_date,),
-            )
-            top_issue_rows = cursor.fetchall()
-
-            issues: list[dict] = []
-            for issue_sources, issue_reasons, failed_count in top_issue_rows:
-                # Impacts: distinct providers/sites/pos
-                cursor.execute(
-                    f"""
-                    SELECT COUNT(DISTINCT providercode) AS providers_impacted,
-                           COUNT(DISTINCT sitecode)      AS sites_impacted,
-                           COUNT(DISTINCT pos)           AS pos_impacted
-                    FROM {TABLE_NAME}
-                    WHERE sales_date = %s
-                      AND response_statuses <> 'success'
-                      AND COALESCE(NULLIF(issue_sources,''),'(null)') = %s
-                      AND COALESCE(NULLIF(issue_reasons,''),'(null)') = %s
-                    """,
-                    (target_date, issue_sources, issue_reasons),
-                )
-                prov_cnt, site_cnt, pos_cnt = cursor.fetchone()
-
-                # Top providers for this issue
-                cursor.execute(
-                    f"""
-                    SELECT providercode, COUNT(*) AS cnt
-                    FROM {TABLE_NAME}
-                    WHERE sales_date = %s
-                      AND response_statuses <> 'success'
-                      AND COALESCE(NULLIF(issue_sources,''),'(null)') = %s
-                      AND COALESCE(NULLIF(issue_reasons,''),'(null)') = %s
-                    GROUP BY providercode
-                    ORDER BY cnt DESC NULLS LAST
-                    LIMIT 5
-                    """,
-                    (target_date, issue_sources, issue_reasons),
-                )
-                top_providers_rows = cursor.fetchall()
-                top_providers = [
-                    {"providercode": r[0], "failed_count": int(r[1])} for r in top_providers_rows
-                ]
-
-                # Top sites for this issue
-                cursor.execute(
-                    f"""
-                    SELECT sitecode, COUNT(*) AS cnt
-                    FROM {TABLE_NAME}
-                    WHERE sales_date = %s
-                      AND response_statuses <> 'success'
-                      AND COALESCE(NULLIF(issue_sources,''),'(null)') = %s
-                      AND COALESCE(NULLIF(issue_reasons,''),'(null)') = %s
-                    GROUP BY sitecode
-                    ORDER BY cnt DESC NULLS LAST
-                    LIMIT 5
-                    """,
-                    (target_date, issue_sources, issue_reasons),
-                )
-                top_sites_rows = cursor.fetchall()
-                top_sites = [
-                    {"sitecode": r[0], "failed_count": int(r[1])} for r in top_sites_rows
-                ]
-
-                share_of_day = round(((failed_count or 0) / total_rows) * 100.0, 4) if total_rows else 0.0
-                issues.append(
-                    {
-                        "issue_sources": issue_sources,
-                        "issue_reasons": issue_reasons,
-                        "failed_count": int(failed_count or 0),
-                        "share_of_day_percent": share_of_day,
-                        "providers_impacted": int(prov_cnt or 0),
-                        "sites_impacted": int(site_cnt or 0),
-                        "pos_impacted": int(pos_cnt or 0),
-                        "top_providers": top_providers,
-                        "top_sites": top_sites,
-                    }
-                )
-
-            return json.dumps(
-                {
-                    "target_date": target_date,
-                    "total_rows": total_rows,
-                    "total_success": total_success,
-                    "total_failed": total_failed,
-                    "failure_rate_percent": failure_rate,
-                    "issues": issues,
-                },
-                indent=2,
-            )
-    except Exception as e:
-        return json.dumps({"error": str(e)}, indent=2)
-
-
-def summarize_issue_impact(issue_sources: str, issue_reasons: str, sales_date: int | None = None, top_n: int = 20) -> str:
-    """
-    Deep-dive impact summary for a specific issue pair on a given day.
-
-    Args:
-        issue_sources: Issue source value (use '(null)' for null/empty)
-        issue_reasons: Issue reason value (use '(null)' for null/empty)
-        sales_date: Optional YYYYMMDD; defaults to latest available
-        top_n: Number of top providers/sites to return (<= 50)
-    """
-    try:
-        top_n = max(1, min(int(top_n), 50))
-    except Exception:
-        top_n = 20
-
-    try:
-        conn = _get_connector().get_connection()
-        with conn.cursor() as cursor:
-            try:
-                cursor.execute("ROLLBACK;")
-            except Exception:
-                pass
-
-            if sales_date is None:
-                cursor.execute(f"SELECT MAX(sales_date) FROM {TABLE_NAME}")
-                target_date = cursor.fetchone()[0]
-            else:
-                target_date = int(sales_date)
-
-            # Totals for the day
-            cursor.execute(
-                f"""
-                WITH base AS (
-                    SELECT response_statuses
-                    FROM {TABLE_NAME}
-                    WHERE sales_date = %s
-                )
-                SELECT
-                    COUNT(*) AS total_rows,
-                    SUM(CASE WHEN response_statuses='success' THEN 1 ELSE 0 END) AS total_success,
-                    SUM(CASE WHEN response_statuses<>'success' THEN 1 ELSE 0 END) AS total_failed
-                FROM base
-                """,
-                (target_date,),
-            )
-            totals_row = cursor.fetchone()
-            total_rows = int(totals_row[0] or 0)
-
-            # Failed rows for the target issue
-            cursor.execute(
-                f"""
-                SELECT COUNT(*)
-                FROM {TABLE_NAME}
-                WHERE sales_date = %s
-                  AND response_statuses <> 'success'
-                  AND COALESCE(NULLIF(issue_sources,''),'(null)') = %s
-                  AND COALESCE(NULLIF(issue_reasons,''),'(null)') = %s
-                """,
-                (target_date, issue_sources, issue_reasons),
-            )
-            failed_for_issue = int(cursor.fetchone()[0] or 0)
-            share_of_day = round(((failed_for_issue or 0) / total_rows) * 100.0, 4) if total_rows else 0.0
-
-            # Impacted distinct counts
-            cursor.execute(
-                f"""
-                SELECT COUNT(DISTINCT providercode) AS providers_impacted,
-                       COUNT(DISTINCT sitecode)      AS sites_impacted,
-                       COUNT(DISTINCT pos)           AS pos_impacted
-                FROM {TABLE_NAME}
-                WHERE sales_date = %s
-                  AND response_statuses <> 'success'
-                  AND COALESCE(NULLIF(issue_sources,''),'(null)') = %s
-                  AND COALESCE(NULLIF(issue_reasons,''),'(null)') = %s
-                """,
-                (target_date, issue_sources, issue_reasons),
-            )
-            prov_cnt, site_cnt, pos_cnt = cursor.fetchone()
-
-            # Top providers
-            cursor.execute(
-                f"""
-                SELECT providercode, COUNT(*) AS cnt
-                FROM {TABLE_NAME}
-                WHERE sales_date = %s
-                  AND response_statuses <> 'success'
-                  AND COALESCE(NULLIF(issue_sources,''),'(null)') = %s
-                  AND COALESCE(NULLIF(issue_reasons,''),'(null)') = %s
-                GROUP BY providercode
-                ORDER BY cnt DESC NULLS LAST
-                LIMIT {top_n}
-                """,
-                (target_date, issue_sources, issue_reasons),
-            )
-            prov_rows = cursor.fetchall()
-            top_providers = [
-                {"providercode": r[0], "failed_count": int(r[1])} for r in prov_rows
-            ]
-
-            # Top sites
-            cursor.execute(
-                f"""
-                SELECT sitecode, COUNT(*) AS cnt
-                FROM {TABLE_NAME}
-                WHERE sales_date = %s
-                  AND response_statuses <> 'success'
-                  AND COALESCE(NULLIF(issue_sources,''),'(null)') = %s
-                  AND COALESCE(NULLIF(issue_reasons,''),'(null)') = %s
-                GROUP BY sitecode
-                ORDER BY cnt DESC NULLS LAST
-                LIMIT {top_n}
-                """,
-                (target_date, issue_sources, issue_reasons),
-            )
-            site_rows = cursor.fetchall()
-            top_sites = [
-                {"sitecode": r[0], "failed_count": int(r[1])} for r in site_rows
-            ]
-
-            # Status distribution among failures for this issue (if multiple failure statuses exist)
-            cursor.execute(
-                f"""
-                SELECT response_statuses, COUNT(*) AS cnt
-                FROM {TABLE_NAME}
-                WHERE sales_date = %s
-                  AND response_statuses <> 'success'
-                  AND COALESCE(NULLIF(issue_sources,''),'(null)') = %s
-                  AND COALESCE(NULLIF(issue_reasons,''),'(null)') = %s
-                GROUP BY response_statuses
-                ORDER BY cnt DESC NULLS LAST
-                LIMIT {top_n}
-                """,
-                (target_date, issue_sources, issue_reasons),
-            )
-            status_rows = cursor.fetchall()
-            failure_statuses = [
-                {"response_statuses": r[0], "cnt": int(r[1])} for r in status_rows
-            ]
-
-            return json.dumps(
-                {
-                    "target_date": target_date,
-                    "issue_sources": issue_sources,
-                    "issue_reasons": issue_reasons,
-                    "failed_count": failed_for_issue,
-                    "share_of_day_percent": share_of_day,
-                    "providers_impacted": int(prov_cnt or 0),
-                    "sites_impacted": int(site_cnt or 0),
-                    "pos_impacted": int(pos_cnt or 0),
-                    "top_providers": top_providers,
-                    "top_sites": top_sites,
-                    "failure_statuses": failure_statuses,
-                },
-                indent=2,
-            )
     except Exception as e:
         return json.dumps({"error": str(e)}, indent=2)

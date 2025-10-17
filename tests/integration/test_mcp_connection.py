@@ -10,7 +10,7 @@ import sys
 def test_mcp_tools():
     """Test that the MCP server can list its tools"""
 
-    script_path = "/Users/weichengzeng/Library/CloudStorage/OneDrive-ATPCO/Desktop/agents/ds-mcp/run_with_env.sh"
+    script_path = "/Users/weichengzeng/Library/CloudStorage/OneDrive-ATPCO/Desktop/agents/ds-mcp/scripts/run_server.sh"
 
     print("Testing MCP server connection...")
     print(f"Script: {script_path}")

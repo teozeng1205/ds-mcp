@@ -33,7 +33,7 @@ pip install -r requirements.txt
 ### Running the Server
 
 ```bash
-# Option 1: Using the run script (recommended)
+# Option 1: Using the run script (recommended, uses .venv python if present)
 cd scripts
 ./run_server.sh
 
@@ -71,7 +71,6 @@ ds-mcp/
 │   └── integration/
 ├── scripts/                         # Utility scripts
 │   ├── run_server.sh
-│   ├── run_with_env.sh
 │   └── explore_table.py
 ├── docs/                            # Documentation
 │   ├── README.md                    # Detailed docs
@@ -85,10 +84,31 @@ ds-mcp/
 
 ## Currently Available Tables
 
-### 1. Market Level Anomalies V3
+### Market Level Anomalies V3
 - **Table**: `analytics.market_level_anomalies_v3`
 - **Tools**: 3 (query_anomalies, get_table_schema, get_available_customers)
 - **Description**: Market-level pricing anomalies with impact scores
+
+### Provider Combined Audit
+- **Table**: `monitoring_prod.provider_combined_audit`
+- **Tools**: 4 (query_audit, get_table_schema, top_site_issues, issue_scope_breakdown)
+- **Description**: Audit trail of provider-level monitoring events and issues.
+- **Macros**: `{{PCA}}`, `{{OD}}`, `{{ISSUE_TYPE}}`, `{{EVENT_TS}}`, `{{OBS_HOUR}}`, `{{IS_SITE}}`, `{{IS_INVALID}}`, `{{LATEST_DATE}}`.
+
+Examples (in Claude with DS-MCP server running):
+- Top site issues for a provider over last 7 days:
+  - Tool: `top_site_issues`
+  - Args: `{ "provider": "QL2|QF", "lookback_days": 7, "limit": 10 }`
+
+- Scope of site issues across dimensions (hour/POS/triptype/LOS/O&D/cabin/depart):
+  - Tool: `issue_scope_breakdown`
+  - Args: `{ "provider": "QL2|QF", "lookback_days": 7, "per_dim_limit": 10 }`
+
+- Ad-hoc SQL with macros (site-related only, latest date):
+  - Tool: `query_audit`
+  - SQL: `SELECT {{ISSUE_TYPE:issue_type}}, COUNT(*) FROM {{PCA}} WHERE {"provider"} ILIKE '%%QL2|QF%%' AND {{IS_SITE}} GROUP BY 1 ORDER BY 2 DESC LIMIT 50`
+
+ 
 
 ## Adding a New Table
 
@@ -162,14 +182,16 @@ See [docs/adding_tables.md](docs/adding_tables.md) for a detailed guide.
 
 Add to your Claude Desktop config file:
 
-**macOS**: `~/Library/Application Support/Claude/claude_desktop_config.json`
+- macOS: `~/Library/Application Support/Claude/claude_desktop_config.json`
+
+Minimal example to run the Market Anomalies server (adjust paths):
 
 ```json
 {
   "mcpServers": {
-    "ds-mcp": {
+    "market-anomalies-v3": {
       "command": "bash",
-      "args": ["/full/path/to/agents/ds-mcp/scripts/run_with_env.sh"],
+      "args": ["/Users/you/path/agents/ds-mcp/scripts/run_market_anomalies.sh"],
       "env": {
         "AWS_ACCESS_KEY_ID": "your-key",
         "AWS_SECRET_ACCESS_KEY": "your-secret",
@@ -179,6 +201,11 @@ Add to your Claude Desktop config file:
   }
 }
 ```
+
+Notes:
+- Ensure `.env.sh` at the repo root exports required variables (e.g., Redshift creds, region) and that the Redshift properties file `database-analytics-redshift-serverless-reader.properties` is discoverable by the connector.
+- The server logs to stderr and exposes tools to Claude Desktop under the configured name.
+- Wrapper scripts prefer Python at `./.venv/bin/python3` (repo-local) or `../.venv/bin/python3` (parent) so the internal `threevictors` package is importable.
 
 ## Development
 

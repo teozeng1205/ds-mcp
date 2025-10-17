@@ -97,7 +97,7 @@ Press Ctrl+C to stop.
   "mcpServers": {
     "ds-mcp-all-tables": {
       "command": "bash",
-      "args": ["/full/path/to/scripts/run_with_env.sh"]
+      "args": ["/full/path/to/scripts/run_server.sh"]
     },
     "market-anomalies-v3": {
       "command": "bash",

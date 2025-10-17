@@ -33,42 +33,72 @@ def _execute_query(sql_query: str, max_rows: int = 100) -> str:
     Returns:
         JSON string with results or error
     """
+    connector = _get_connector()
+    conn = connector.get_connection()
+
+    # Ensure autocommit where possible to reduce aborted transaction states
     try:
-        connector = _get_connector()
+        if getattr(conn, "autocommit", None) is False:
+            conn.autocommit = True
+    except Exception:
+        pass
 
-        with connector.get_connection().cursor() as cursor:
-            cursor.execute(sql_query)
+    attempts = 0
+    while attempts < 2:
+        try:
+            with conn.cursor() as cursor:
+                # Clear any aborted transaction state defensively
+                try:
+                    cursor.execute("ROLLBACK;")
+                except Exception:
+                    pass
 
-            # Get column names
-            colnames = [desc[0] for desc in cursor.description]
+                cursor.execute(sql_query)
 
-            # Fetch results
-            records = cursor.fetchmany(max_rows)
+                # Get column names
+                colnames = [desc[0] for desc in cursor.description]
 
-            # Convert to list of dicts
-            results = []
-            for record in records:
-                row_dict = {}
-                for i, col in enumerate(colnames):
-                    value = record[i]
-                    if value is not None and not isinstance(value, (str, int, float, bool)):
-                        value = str(value)
-                    row_dict[col] = value
-                results.append(row_dict)
+                # Fetch results
+                records = cursor.fetchmany(max_rows)
 
-            output = {
-                "columns": colnames,
-                "rows": results,
-                "row_count": len(results),
-                "truncated": len(results) == max_rows
-            }
+                # Convert to list of dicts
+                results = []
+                for record in records:
+                    row_dict = {}
+                    for i, col in enumerate(colnames):
+                        value = record[i]
+                        if value is not None and not isinstance(value, (str, int, float, bool)):
+                            value = str(value)
+                        row_dict[col] = value
+                    results.append(row_dict)
 
-            log.info(f"Query returned {len(results)} rows")
-            return json.dumps(output, indent=2)
+                output = {
+                    "columns": colnames,
+                    "rows": results,
+                    "row_count": len(results),
+                    "truncated": len(results) == max_rows,
+                }
 
-    except Exception as e:
-        log.error(f"Error executing query: {str(e)}")
-        return json.dumps({"error": str(e)}, indent=2)
+                log.info(f"Query returned {len(results)} rows")
+                return json.dumps(output, indent=2)
+
+        except Exception as e:
+            msg = str(e)
+            # Redshift aborted transaction code 25P02 or message text
+            if ("25P02" in msg or "current transaction is aborted" in msg) and attempts == 0:
+                try:
+                    # Attempt to rollback and retry once
+                    try:
+                        conn.rollback()
+                    except Exception:
+                        pass
+                finally:
+                    attempts += 1
+                    continue
+            log.error(f"Error executing query: {msg}")
+            return json.dumps({"error": msg}, indent=2)
+
+    return json.dumps({"error": "Query failed after retry due to aborted transaction state"}, indent=2)
 
 
 def query_anomalies(sql_query: str) -> str:
@@ -157,58 +187,103 @@ def get_table_schema() -> str:
     Returns:
         JSON string containing table schema information
     """
+    query = f"""
+    SELECT
+        column_name,
+        data_type,
+        character_maximum_length,
+        is_nullable
+    FROM information_schema.columns
+    WHERE table_schema = 'analytics'
+      AND table_name = 'market_level_anomalies_v3'
+    ORDER BY ordinal_position;
+    """
+
+    connector = _get_connector()
+    conn = connector.get_connection()
+    # Try to ensure autocommit and clear any aborted state
     try:
-        log.info("Fetching table schema")
+        if getattr(conn, "autocommit", None) is False:
+            conn.autocommit = True
+    except Exception:
+        pass
 
-        query = f"""
-        SELECT
-            column_name,
-            data_type,
-            character_maximum_length,
-            is_nullable
-        FROM information_schema.columns
-        WHERE table_schema = 'analytics'
-          AND table_name = 'market_level_anomalies_v3'
-        ORDER BY ordinal_position;
-        """
+    attempts = 0
+    while attempts < 2:
+        try:
+            with conn.cursor() as cursor:
+                try:
+                    cursor.execute("ROLLBACK;")
+                except Exception:
+                    pass
 
-        connector = _get_connector()
+                cursor.execute(query)
+                colnames = [desc[0] for desc in cursor.description]
+                records = cursor.fetchall()
 
-        with connector.get_connection().cursor() as cursor:
-            cursor.execute(query)
-            colnames = [desc[0] for desc in cursor.description]
-            records = cursor.fetchall()
+                results = []
+                for record in records:
+                    row_dict = {}
+                    for i, col in enumerate(colnames):
+                        row_dict[col] = record[i]
+                    results.append(row_dict)
 
-            results = []
-            for record in records:
-                row_dict = {}
-                for i, col in enumerate(colnames):
-                    row_dict[col] = record[i]
-                results.append(row_dict)
+                # Fallback to SVV_COLUMNS if information_schema returns no rows
+                if len(results) == 0:
+                    try:
+                        log.info("information_schema returned 0 columns; falling back to SVV_COLUMNS")
+                        cursor.execute(
+                            """
+                            SELECT column_name, data_type, character_maximum_length, is_nullable
+                            FROM svv_columns
+                            WHERE table_schema = 'analytics'
+                              AND table_name = 'market_level_anomalies_v3'
+                            ORDER BY ordinal_position;
+                            """
+                        )
+                        colnames = [desc[0] for desc in cursor.description]
+                        records = cursor.fetchall()
+                        for record in records:
+                            row_dict = {}
+                            for i, col in enumerate(colnames):
+                                row_dict[col] = record[i]
+                            results.append(row_dict)
+                    except Exception as e2:
+                        log.warning(f"SVV_COLUMNS fallback failed: {e2}")
 
-            output = {
-                "table": TABLE_NAME,
-                "columns": results,
-                "notes": {
-                    "primary_key": ["customer", "sales_date", "seg_mkt"],
-                    "important_metrics": {
-                        "impact_score": "Main impact metric - use for ordering by importance",
-                        "any_anomaly": "Flag indicating if record is an anomaly (1=yes, 0=no)",
-                        "freq_pcnt_val": "Frequency percentage value",
-                        "mag_pcnt_val": "Magnitude percentage value",
-                        "mag_nominal_val": "Magnitude nominal value"
-                    },
-                    "date_format": "sales_date is YYYYMMDD integer (e.g., 20251014)",
-                    "customer_format": "Two-letter code (e.g., 'SK', 'AS', 'B6')"
+                output = {
+                    "table": TABLE_NAME,
+                    "columns": results,
+                    "notes": {
+                        "primary_key": ["customer", "sales_date", "seg_mkt"],
+                        "important_metrics": {
+                            "impact_score": "Main impact metric - use for ordering by importance",
+                            "any_anomaly": "Flag indicating if record is an anomaly (1=yes, 0=no)",
+                            "freq_pcnt_val": "Frequency percentage value",
+                            "mag_pcnt_val": "Magnitude percentage value",
+                            "mag_nominal_val": "Magnitude nominal value"
+                        },
+                        "date_format": "sales_date is YYYYMMDD integer (e.g., 20251014)",
+                        "customer_format": "Two-letter code (e.g., 'SK', 'AS', 'B6')"
+                    }
                 }
-            }
 
-            log.info(f"Schema returned {len(results)} columns")
-            return json.dumps(output, indent=2)
+                log.info(f"Schema returned {len(results)} columns")
+                return json.dumps(output, indent=2)
 
-    except Exception as e:
-        log.error(f"Error fetching schema: {str(e)}")
-        return json.dumps({"error": str(e)}, indent=2)
+        except Exception as e:
+            msg = str(e)
+            if ("25P02" in msg or "current transaction is aborted" in msg) and attempts == 0:
+                try:
+                    conn.rollback()
+                except Exception:
+                    pass
+                attempts += 1
+                continue
+            log.error(f"Error fetching schema: {msg}")
+            return json.dumps({"error": msg}, indent=2)
+
+    return json.dumps({"error": "Schema query failed after retry due to aborted transaction state"}, indent=2)
 
 
 def get_available_customers() -> str:
@@ -232,31 +307,52 @@ def get_available_customers() -> str:
     ORDER BY customer;
     """
 
+    connector = _get_connector()
+    conn = connector.get_connection()
     try:
-        log.info("Fetching available customers")
+        if getattr(conn, "autocommit", None) is False:
+            conn.autocommit = True
+    except Exception:
+        pass
 
-        connector = _get_connector()
+    attempts = 0
+    while attempts < 2:
+        try:
+            with conn.cursor() as cursor:
+                try:
+                    cursor.execute("ROLLBACK;")
+                except Exception:
+                    pass
 
-        with connector.get_connection().cursor() as cursor:
-            cursor.execute(query)
-            colnames = [desc[0] for desc in cursor.description]
-            records = cursor.fetchall()
+                cursor.execute(query)
+                colnames = [desc[0] for desc in cursor.description]
+                records = cursor.fetchall()
 
-            results = []
-            for record in records:
-                row_dict = {}
-                for i, col in enumerate(colnames):
-                    row_dict[col] = record[i]
-                results.append(row_dict)
+                results = []
+                for record in records:
+                    row_dict = {}
+                    for i, col in enumerate(colnames):
+                        row_dict[col] = record[i]
+                    results.append(row_dict)
 
-            output = {
-                "customers": results,
-                "count": len(results)
-            }
+                output = {
+                    "customers": results,
+                    "count": len(results)
+                }
 
-            log.info(f"Found {len(results)} customers")
-            return json.dumps(output, indent=2)
+                log.info(f"Found {len(results)} customers")
+                return json.dumps(output, indent=2)
 
-    except Exception as e:
-        log.error(f"Error fetching customers: {str(e)}")
-        return json.dumps({"error": str(e)}, indent=2)
+        except Exception as e:
+            msg = str(e)
+            if ("25P02" in msg or "current transaction is aborted" in msg) and attempts == 0:
+                try:
+                    conn.rollback()
+                except Exception:
+                    pass
+                attempts += 1
+                continue
+            log.error(f"Error fetching customers: {msg}")
+            return json.dumps({"error": msg}, indent=2)
+
+    return json.dumps({"error": "Customer list query failed after retry due to aborted transaction state"}, indent=2)
