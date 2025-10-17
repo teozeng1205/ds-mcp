@@ -25,8 +25,8 @@ fi
 # Setup AWS authentication (validates existing session or triggers SSO login)
 source "$SCRIPT_DIR/common_aws_setup.sh"
 
-# Export PYTHONPATH to include src directory and parent for threevictors
-export PYTHONPATH="$ROOT_DIR/src:$ROOT_DIR/..:$PYTHONPATH"
+# Export PYTHONPATH to include ds-mcp src only (threevictors should be installed via pip)
+export PYTHONPATH="$ROOT_DIR/src:${PYTHONPATH:-}"
 
 echo "Starting DS-MCP Server..." >&2
 echo "Press Ctrl+C to stop" >&2

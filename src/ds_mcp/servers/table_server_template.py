@@ -15,9 +15,6 @@ import sys
 import os
 import logging
 
-# Add parent directory to path to import threevictors
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../../../..'))
-
 from mcp.server.fastmcp import FastMCP
 from ds_mcp.core.registry import TableRegistry
 # TODO: Replace with your table import

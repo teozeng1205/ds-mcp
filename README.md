@@ -26,9 +26,10 @@ Pick the path that fits your setup. The monorepo path is the easiest.
 python -m venv .venv
 source .venv/bin/activate
 
-# Install packages
-(cd openai-agents-python && pip install -e .)
-(cd ds-threevictors && pip install -e .)
+# Install required packages
+pip install -U pip
+pip install openai-agents ds-threevictors
+# Optional: install ds-mcp in editable mode for development
 (cd ds-mcp && pip install -e .)
 
 # Create env.sh at repo root if you don't have one yet
