@@ -84,18 +84,6 @@ def _expand_macros(sql: str) -> str:
 
     return result
 
-
-# ============================================================================
-# Provider/Site Parsing
-# ============================================================================
-
-# Note: Keep matching simple (ILIKE on provider/site).
-
-
-# ============================================================================
-# Database Helpers
-# ============================================================================
-
 def _get_conn():
     """Get database connection with autocommit enabled."""
     conn = DatabaseConnectorFactory.get_connector("analytics").get_connection()
@@ -278,16 +266,12 @@ def top_site_issues(provider: str, lookback_days: int = 7, limit: int = 10) -> s
         f"WHERE {PROVIDER_COL} ILIKE %s "
         f"AND {_sales_date_bound(lookback_days)} "
         f"AND {date_expr} >= CURRENT_DATE - {lookback_days} "
+        "AND NULLIF(TRIM(issue_sources::VARCHAR), '') IS NOT NULL "
         "GROUP BY 1 ORDER BY 2 DESC "
         f"LIMIT {limit}"
     )
     params = [f"%{provider}%"]
     return _execute_select(sql, params)
-
-
-
-#! removed legacy breakdown function
-
 
 def issue_scope_quick_by_site(provider: str, site: str, lookback_days: int = 3, per_dim_limit: int = 5) -> str:
     """
@@ -312,6 +296,7 @@ def issue_scope_quick_by_site(provider: str, site: str, lookback_days: int = 3, 
         f"AND {SITE_COL} ILIKE %s "
         f"AND {_sales_date_bound(lookback_days)} "
         f"AND {date_expr} >= CURRENT_DATE - {lookback_days} "
+        "AND NULLIF(TRIM(issue_sources::VARCHAR), '') IS NOT NULL "
     )
     params = [f"%{provider}%", f"%{site}%"]
     obs_sql = "SELECT {{OBS_HOUR}} AS bucket, COUNT(*) AS cnt" + base + f"GROUP BY 1 ORDER BY 2 DESC LIMIT {per_dim_limit}"
@@ -356,6 +341,7 @@ def issue_scope_by_site_dimensions(
         f"AND {SITE_COL} ILIKE %s "
         f"AND {_sales_date_bound(lookback_days)} "
         f"AND {date_expr} >= CURRENT_DATE - {lookback_days} "
+        "AND NULLIF(TRIM(issue_sources::VARCHAR), '') IS NOT NULL "
     )
     params = [f"%{provider}%", f"%{site}%"]
 
@@ -402,6 +388,7 @@ def overview_site_issues_today(per_dim_limit: int = 5) -> str:
         " FROM {{PCA}} "
         f"WHERE sales_date = {_today_int()} "
         f"AND {date_expr} >= CURRENT_DATE "
+        "AND NULLIF(TRIM(issue_sources::VARCHAR), '') IS NOT NULL "
     )
     issues_sql = f"SELECT NULLIF(TRIM(LOWER(COALESCE(issue_reasons::VARCHAR, issue_sources::VARCHAR))), '') AS issue_key, COUNT(*) AS cnt {base} GROUP BY 1 ORDER BY 2 DESC LIMIT {per_dim_limit}"
     providers_sql = f"SELECT NULLIF(TRIM({PROVIDER_COL}::VARCHAR), '') AS provider, COUNT(*) AS cnt {base} GROUP BY 1 ORDER BY 2 DESC LIMIT {per_dim_limit}"
@@ -435,6 +422,7 @@ def list_provider_sites(provider: str, lookback_days: int = 7, limit: int = 10) 
         f"WHERE {PROVIDER_COL} ILIKE %s "
         f"AND {_sales_date_bound(lookback_days)} "
         f"AND {date_expr} >= CURRENT_DATE - {lookback_days} "
+        "AND NULLIF(TRIM(issue_sources::VARCHAR), '') IS NOT NULL "
         f"AND NULLIF(TRIM({SITE_COL}::VARCHAR), '') IS NOT NULL "
         "GROUP BY 1 ORDER BY 2 DESC "
         f"LIMIT {limit}"
