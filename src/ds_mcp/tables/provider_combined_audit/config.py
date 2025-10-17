@@ -33,6 +33,7 @@ def get_table_config() -> TableConfig:
             tools.get_table_schema,
             tools.top_site_issues,
             tools.issue_scope_breakdown,
+            tools.issue_scope_breakdown_by_site,
         ],
         metadata={
             "primary_key": "unknown",
