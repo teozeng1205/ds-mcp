@@ -781,3 +781,71 @@ def overview_site_issues_today(per_dim_limit: int = 5) -> str:
 
     except Exception as e:
         return json.dumps({"error": str(e)}, indent=2)
+
+
+def list_provider_sites(provider: str, lookback_days: int = 7, limit: int = 10) -> str:
+    """
+    Top site codes for a provider over a recent window (partition-pruned).
+    Args: provider (ILIKE pattern), lookback_days (default 7), limit (default 10).
+    Returns JSON: filters, rows [{site, count, pct}], row_count, sql.
+    """
+    limit = min(max(1, limit), 50)
+    cols = _get_columns()
+
+    provider_col = _pick_column(cols, ["providercode", "provider"]) or "providercode"
+    site_col = _pick_column(cols, ["sitecode", "site", "site_code"]) or "sitecode"
+    date_col = _pick_column(cols, ["scheduledate"]) or "scheduledate"
+    date_expr = _date_expr(date_col, cols.get(date_col, ""))
+
+    provider_filter = f"{provider_col} ILIKE %s"
+    params = [f"%{provider}%"]
+
+    base_where = f"""
+    WHERE {provider_filter}
+      AND {_sales_date_bound(lookback_days)}
+      AND {date_expr} >= CURRENT_DATE - {lookback_days}
+      AND {_build_site_filter()}
+      AND NULLIF(TRIM({site_col}::VARCHAR), '') IS NOT NULL
+    """
+
+    # Total rows for pct
+    try:
+        conn = _get_conn()
+
+        with conn.cursor() as cur:
+            total_sql = f"SELECT COUNT(*) FROM {TABLE_NAME} {base_where}"
+            log.info(f"SQL[list_provider_sites/total]: {total_sql.strip()} | params={params}")
+            _safe_execute(cur, total_sql, tuple(params))
+            total = int(cur.fetchone()[0])
+
+        sql = f"""
+        SELECT NULLIF(TRIM({site_col}::VARCHAR), '') AS site, COUNT(*) AS cnt
+        FROM {TABLE_NAME}
+        {base_where}
+        GROUP BY 1
+        ORDER BY 2 DESC
+        LIMIT {limit}
+        """
+
+        with conn.cursor() as cur:
+            log.info(f"SQL[list_provider_sites]: {sql.strip()} | params={params}")
+            _safe_execute(cur, sql, tuple(params))
+            rows = []
+            for site_val, cnt in cur.fetchall():
+                pct = cnt / total if total > 0 else 0
+                rows.append({"site": str(site_val), "count": int(cnt), "pct": round(pct, 4)})
+
+        return json.dumps({
+            "filters": {
+                "provider_like": provider,
+                "issue_type": "site_related",
+                "lookback_days": lookback_days,
+            },
+            "rows": rows,
+            "row_count": len(rows),
+            "total_count": total,
+            "sql": sql,
+        }, indent=2)
+
+    except Exception as e:
+        return json.dumps({"error": str(e)}, indent=2)

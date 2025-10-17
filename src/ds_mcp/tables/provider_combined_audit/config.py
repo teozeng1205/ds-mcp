@@ -30,6 +30,7 @@ def get_table_config() -> TableConfig:
             tools.query_audit,
             tools.get_table_schema,
             tools.top_site_issues,
+            tools.list_provider_sites,
             tools.issue_scope_quick_by_site,
             tools.issue_scope_by_site_dimensions,
             tools.overview_site_issues_today,
