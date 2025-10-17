@@ -206,134 +206,9 @@ def _date_expr(col: str, dtype: str) -> str:
 
 def query_audit(sql_query: str) -> str:
     """
-    Execute a read-only SQL query against provider monitoring data with macro support.
-
-    This tool allows you to write custom SQL queries to analyze provider issues, with
-    helpful macros that automatically expand to complex SQL expressions.
-
-    INPUT PARAMETERS:
-    ------------------
-    sql_query (str, REQUIRED): A SQL SELECT query as a string. Must start with SELECT or WITH.
-                                Can use macros (see below) for common patterns.
-
-    IMPORTANT - Issue Type Classification:
-    ---------------------------------------
-    There are TWO types of issues that are automatically classified:
-
-    1. SITE-RELATED ISSUES (use {{IS_SITE}} filter):
-       - Timeouts, SSL/TLS errors, captcha blocks
-       - Website downtime, cloudflare/akamai blocks
-       - HTTP errors (403 forbidden, 503 unavailable, 500 internal server error)
-       - Keywords: 'site', 'website', 'timeout', 'ssl', 'tls', 'captcha', 'akamai',
-                  'cloudflare', 'forbidden', 'service unavailable', 'internal server error'
-
-    2. INVALID-REQUEST ISSUES (use {{IS_INVALID}} filter):
-       - Bad input parameters, malformed requests
-       - Missing required fields, unsupported operations
-       - Keywords: 'invalid', 'bad request', 'missing', 'malformed', 'unsupported', 'param'
-
-    AVAILABLE MACROS:
-    -----------------
-    - {{PCA}}
-      Expands to: monitoring_prod.provider_combined_audit
-      Use in: FROM clause
-
-    - {{OD}}
-      Expands to: (originairportcode || '-' || destinationairportcode)
-      Use in: SELECT, GROUP BY for origin-destination pairs
-
-    - {{ISSUE_TYPE}} or {{ISSUE_TYPE:column_name}}
-      Expands to: CASE statement that classifies issues as 'site_related', 'invalid_request', or 'other'
-      Use in: SELECT clause to see issue type distribution
-
-    - {{EVENT_TS}} or {{EVENT_TS:column_name}}
-      Expands to: Best-effort event timestamp from multiple timestamp columns
-      Use in: SELECT, WHERE, GROUP BY for time-based analysis
-
-    - {{OBS_HOUR}}
-      Expands to: DATE_TRUNC('hour', {{EVENT_TS}})
-      Use in: SELECT, GROUP BY for hourly patterns
-
-    - {{IS_SITE}}
-      Expands to: Boolean condition for site-related issues only
-      Use in: WHERE clause to filter to site issues
-
-    - {{IS_INVALID}}
-      Expands to: Boolean condition for invalid-request issues only
-      Use in: WHERE clause to filter to invalid-request issues
-
-    KEY TABLE COLUMNS:
-    ------------------
-    - providercode (VARCHAR): Provider identifier (e.g., 'AA', 'DL')
-    - issue_sources (VARCHAR): Source/category of issue
-    - issue_reasons (VARCHAR): Detailed reason for issue
-    - scheduledate (BIGINT): Observation date in YYYYMMDD format
-    - pos (VARCHAR): Point of sale
-    - cabin (VARCHAR): Cabin class
-    - triptype (CHAR): Trip type ('R' = round-trip, 'O' = one-way)
-    - los (BIGINT): Length of stay in days
-    - originairportcode (CHAR): Origin airport code
-    - destinationairportcode (CHAR): Destination airport code
-    - departdate (INT): Departure date YYYYMMDD
-    - returndate (INT): Return date YYYYMMDD
-
-    EXAMPLE QUERIES:
-    ----------------
-
-    Example 1: "Show me top site-related issues for AA in the last 7 days"
-    ```sql
-    SELECT COALESCE(NULLIF(TRIM(issue_reasons::VARCHAR), ''), 'unknown') AS issue,
-           COUNT(*) AS count
-    FROM {{PCA}}
-    WHERE providercode ILIKE '%AA%'
-      AND {{IS_SITE}}
-      AND TO_DATE(scheduledate::VARCHAR, 'YYYYMMDD') >= CURRENT_DATE - 7
-    GROUP BY 1
-    ORDER BY 2 DESC
-    LIMIT 20;
-    ```
-
-    Example 2: "Show hourly pattern of site issues for AA in last 3 days"
-    ```sql
-    SELECT {{OBS_HOUR}} AS hour, COUNT(*) AS count
-    FROM {{PCA}}
-    WHERE providercode ILIKE '%AA%'
-      AND {{IS_SITE}}
-      AND TO_DATE(scheduledate::VARCHAR, 'YYYYMMDD') >= CURRENT_DATE - 3
-    GROUP BY 1
-    ORDER BY 1;
-    ```
-
-    Example 3: "Compare site vs invalid-request issues for all providers yesterday"
-    ```sql
-    SELECT {{ISSUE_TYPE:issue_type}}, COUNT(*) AS count
-    FROM {{PCA}}
-    WHERE TO_DATE(scheduledate::VARCHAR, 'YYYYMMDD') = CURRENT_DATE - 1
-    GROUP BY 1
-    ORDER BY 2 DESC;
-    ```
-
-    Example 4: "Show routes with most invalid-request issues"
-    ```sql
-    SELECT {{OD}} AS route, COUNT(*) AS count
-    FROM {{PCA}}
-    WHERE {{IS_INVALID}}
-      AND TO_DATE(scheduledate::VARCHAR, 'YYYYMMDD') >= CURRENT_DATE - 7
-    GROUP BY 1
-    ORDER BY 2 DESC
-    LIMIT 10;
-    ```
-
-    RETURNS:
-    --------
-    JSON string with:
-    - columns (list): Column names from query result
-    - rows (list): Array of result rows as JSON objects
-    - row_count (int): Number of rows returned
-    - expanded_sql (str): The actual SQL executed (with macros expanded)
-
-    Or if error:
-    - error (str): Error message
+    Run a read‑only SELECT (or WITH ... SELECT) on monitoring_prod.provider_combined_audit.
+    Supports simple macros (e.g., {{PCA}}, {{IS_SITE}}, {{OD}}). Adds LIMIT 100 if missing.
+    Returns JSON: columns, rows, row_count, truncated.
     """
     try:
         # Expand macros
@@ -383,41 +258,8 @@ def query_audit(sql_query: str) -> str:
 
 def get_table_schema() -> str:
     """
-    Get the complete table schema showing all available columns and their data types.
-
-    Use this tool when you need to:
-    - Discover what columns are available before writing a query
-    - Check column data types to know how to filter or format them
-    - Find available dimensions for analysis (POS, cabin, triptype, etc.)
-
-    INPUT PARAMETERS:
-    ------------------
-    None - This tool takes no parameters
-
-    WHEN TO USE:
-    ------------
-    - User asks "what data is available?"
-    - Before writing a custom query with query_audit()
-    - To verify column names for top_site_issues() or issue_scope_breakdown()
-
-    RETURNS:
-    --------
-    JSON string with:
-    - table (str): Full table name "monitoring_prod.provider_combined_audit"
-    - columns (list): Array of {column_name, data_type} objects for all 52 columns
-    - notes (object): Helpful groupings:
-        * issue_fields: Columns containing issue information
-        * date_fields: Columns for date/time filtering
-        * search_dimensions: Columns for dimensional analysis (POS, cabin, etc.)
-        * travel_dates: Departure and return date columns
-
-    EXAMPLE USAGE:
-    --------------
-    User: "What columns are in the provider audit table?"
-    Action: Call get_table_schema() with no parameters
-
-    User: "What dimensions can I analyze issues by?"
-    Action: Call get_table_schema() and look at the 'notes.search_dimensions' field
+    List columns and data types for monitoring_prod.provider_combined_audit.
+    Returns JSON: table, columns, notes.
     """
     cols = _get_columns()
     columns = [{"column_name": k, "data_type": v} for k, v in cols.items()]
@@ -436,80 +278,9 @@ def get_table_schema() -> str:
 
 def top_site_issues(provider: str, lookback_days: int = 7, limit: int = 10) -> str:
     """
-    Get the top site-related issues for a specific provider, ranked by frequency.
-
-    This tool answers questions like:
-    - "What are the top site issues for AA?"
-    - "Show me the most common site problems for provider AA"
-    - "What site errors is DL experiencing?"
-
-    IMPORTANT - What are SITE-RELATED issues?
-    ------------------------------------------
-    Site-related issues are infrastructure/connectivity problems, including:
-    - Timeouts and connection failures
-    - SSL/TLS certificate errors and handshake failures
-    - Captcha blocks and bot detection (akamai, cloudflare)
-    - HTTP errors: 403 Forbidden, 503 Service Unavailable, 500 Internal Server Error
-    - Website downtime or unavailability
-
-    These are DIFFERENT from invalid-request issues (bad parameters, malformed requests).
-
-    INPUT PARAMETERS:
-    ------------------
-    provider (str, REQUIRED):
-        Provider code or name text to match (simple ILIKE)
-
-        Format options:
-        - Uses case-insensitive matching with SQL ILIKE '%pattern%'
-        - Examples: "AA", "Delta", "United"
-
-    lookback_days (int, OPTIONAL, default=7):
-        How many days of data to analyze, counting back from most recent data
-        - Default: 7 (last week)
-        - Examples: 1 (yesterday only), 7 (last week), 30 (last month)
-        - Range: 1 to 365
-
-    limit (int, OPTIONAL, default=10):
-        Maximum number of top issues to return
-        - Default: 10
-        - Maximum: 50
-        - Returns issues ranked by count (most frequent first)
-
-    RETURNS:
-    --------
-    JSON string with:
-    - filters (object): The filters applied
-        * provider_like: The provider pattern searched
-        * issue_type: Always "site_related"
-        * lookback_days: Days of data analyzed
-    - rows (list): Top issues ranked by frequency, each with:
-        * issue_key: The issue name (from issue_reasons or issue_sources)
-        * count: Number of occurrences
-    - row_count (int): Number of issues returned
-
-    EXAMPLE USAGE:
-    --------------
-    User: "AA has an increase in site-related issues. What are the top site issues?"
-    Action: top_site_issues(provider="AA", lookback_days=7, limit=20)
-
-    User: "Show me site problems for American Airlines in the last 3 days"
-    Action: top_site_issues(provider="AA", lookback_days=3, limit=10)
-
-    User: "What are the most common site errors for all Delta providers?"
-    Action: top_site_issues(provider="Delta", lookback_days=7, limit=15)
-
-    WHEN TO USE:
-    ------------
-    - User mentions "site issues", "site problems", "site errors"
-    - User asks "what are the top issues" (and means site-related)
-    - User wants to see most frequent/common issues
-    - User specifies a provider name or code
-
-    WHEN NOT TO USE:
-    ----------------
-    - For invalid-request issues → use query_audit() with {{IS_INVALID}} filter
-    - For dimensional breakdown → use issue_scope_breakdown()
-    - For custom analysis → use query_audit()
+    Top site‑related issues for a provider (ILIKE match on providercode).
+    Args: provider, lookback_days (default 7), limit (default 10, max 50).
+    Returns JSON: filters, rows [{issue_key, count}], row_count.
     """
     limit = min(max(1, limit), 50)
     cols = _get_columns()
@@ -563,117 +334,9 @@ def top_site_issues(provider: str, lookback_days: int = 7, limit: int = 10) -> s
 
 def issue_scope_breakdown(provider: str, lookback_days: int = 7, per_dim_limit: int = 10) -> str:
     """
-    Analyze WHERE site-related issues are concentrated across multiple dimensions.
-
-    This tool answers questions like:
-    - "What is the scope of the issue?"
-    - "What dimensions is this concentrated in?"
-    - "Which POS/routes/cabin classes are most affected?"
-    - "When do these issues occur? (hourly pattern)"
-
-    Use this tool to understand the SCOPE and CONCENTRATION of issues, showing:
-    - WHEN: Hourly observation patterns
-    - WHERE (Geography): Point of sale (POS) distribution
-    - WHAT (Product): Trip type, cabin class, length of stay
-    - WHERE (Routes): Origin-destination pairs most affected
-    - WHEN (Travel): Departure week and day-of-week patterns
-
-    DIMENSIONS ANALYZED:
-    --------------------
-    1. obs_hour: Observation hour (when issue was detected)
-       - Shows if issues happen at specific times of day
-       - Example: "2025-10-16 14:00:00"
-
-    2. pos: Point of Sale (where customer is searching from)
-       - Geographic distribution of issues
-       - Examples: "US", "CA", "GB", "DE"
-
-    3. triptype: Trip Type
-       - Round-trip vs one-way distribution
-       - Values: "R" (round-trip), "O" (one-way)
-
-    4. los: Length of Stay (in days)
-       - How long between departure and return
-       - Examples: "3", "7", "14"
-
-    5. od: Origin-Destination pairs (routes)
-       - Which routes are most affected
-       - Examples: "JFK-LAX", "ORD-DFW", "ATL-LAS"
-
-    6. cabin: Cabin Class
-       - Which cabins have issues
-       - Examples: "Economy", "Business", "First"
-
-    7. depart_week: Departure Week
-       - Which travel weeks are affected
-       - Example: "2025-10-20" (week starting date)
-
-    8. depart_dow: Departure Day of Week
-       - Which days of week for departure
-       - Values: 0 (Sunday) through 6 (Saturday)
-
-    INPUT PARAMETERS:
-    ------------------
-    provider (str, REQUIRED):
-        Provider code or name text to match (simple ILIKE)
-
-        Format options:
-        - Uses case-insensitive matching with SQL ILIKE '%pattern%'
-        - Examples: "AA", "Delta", "United"
-
-    lookback_days (int, OPTIONAL, default=7):
-        How many days of data to analyze
-        - Default: 7 (last week)
-        - Examples: 3 (last 3 days), 14 (last 2 weeks), 30 (last month)
-        - Range: 1 to 365
-
-    per_dim_limit (int, OPTIONAL, default=10):
-        Maximum rows to return per dimension
-        - Default: 10 (top 10 values per dimension)
-        - Maximum: 25
-        - Shows most concentrated values first
-
-    RETURNS:
-    --------
-    JSON string with:
-    - filters (object): Filters applied
-        * provider_like: Provider pattern searched
-        * issue_type: Always "site_related"
-        * lookback_days: Days analyzed
-    - total_count (int): Total site issues found for this provider
-    - available_dimensions (list): Which dimensions had data (may be subset of 8)
-    - breakdowns (object): For each dimension, array of:
-        * bucket: The dimension value (e.g., "US" for POS, "JFK-LAX" for od)
-        * count: Number of issues for this value
-        * pct: Percentage of total issues (0.0 to 1.0)
-
-    EXAMPLE USAGE:
-    --------------
-    User: "What is the scope of the issue? What dimensions is this concentrated in?"
-    Action: issue_scope_breakdown(provider="AA", lookback_days=7, per_dim_limit=10)
-    Response interpretation:
-        - Check breakdowns.obs_hour → "Issues concentrated in 14:00-16:00 hours"
-        - Check breakdowns.pos → "80% of issues from US point of sale"
-        - Check breakdowns.od → "JFK-LAX route has 45% of issues"
-
-    User: "Where are the AA site issues concentrated?"
-    Action: issue_scope_breakdown(provider="AA", lookback_days=7, per_dim_limit=15)
-
-    User: "Show me the scope of Delta's site problems across all dimensions"
-    Action: issue_scope_breakdown(provider="Delta", lookback_days=14, per_dim_limit=20)
-
-    WHEN TO USE:
-    ------------
-    - User asks about "scope" of issues
-    - User asks "what dimensions" or "where concentrated"
-    - User wants to see distribution across POS, routes, cabin, time
-    - After using top_site_issues() to understand WHERE issues occur
-
-    WHEN NOT TO USE:
-    ----------------
-    - To see WHAT issues (use top_site_issues instead)
-    - For invalid-request issues (use query_audit with {{IS_INVALID}})
-    - For single dimension analysis (use query_audit with GROUP BY)
+    Scope of site issues for a provider across: obs_hour, pos, od, cabin, depart_week.
+    Args: provider, lookback_days (default 7), per_dim_limit (default 10, max 25).
+    Returns JSON: filters, total_count, available_dimensions, breakdowns.
     """
     per_dim_limit = min(max(1, per_dim_limit), 25)
     cols = _get_columns()
