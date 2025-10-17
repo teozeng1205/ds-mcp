@@ -370,34 +370,37 @@ def issue_scope_by_site_dimensions(
     return json.dumps(results, indent=2)
 
 
-def overview_site_issues_today(per_dim_limit: int = 5) -> str:
+def overview_site_issues_today(per_dim_limit: int = 50) -> str:
     """
-    High-level overview for today across all providers.
+    High-level overview for today across all providers using a single SQL query.
 
-    Args:
-        per_dim_limit: Max buckets per section (1–25).
+    Returns a single tabular result with columns:
+      - issue_key (lowercased non-empty issue_sources)
+      - provider (providercode)
+      - pos (point-of-sale)
+      - obs_hour (event hour)
+      - cnt (row count)
 
-    Returns:
-        JSON with sections: issues, providers, pos, obs_hour; each {columns, rows}.
+    The query filters out rows where issue_sources is empty ("OK" rows).
     """
-    per_dim_limit = min(max(1, per_dim_limit), 25)
+    per_dim_limit = min(max(1, per_dim_limit), 500)
     date_expr = _date_expr(DATE_COL, "bigint")
-    base = (
-        " FROM {{PCA}} "
+    sql = (
+        "SELECT "
+        "  NULLIF(TRIM(LOWER(issue_sources::VARCHAR)), '') AS issue_key, "
+        f"  NULLIF(TRIM({PROVIDER_COL}::VARCHAR), '') AS provider, "
+        f"  NULLIF(TRIM({POS_COL}::VARCHAR), '') AS pos, "
+        "  {{OBS_HOUR}} AS obs_hour, "
+        "  COUNT(*) AS cnt "
+        "FROM {{PCA}} "
         f"WHERE sales_date = {_today_int()} "
-        f"AND {date_expr} >= CURRENT_DATE "
-        "AND NULLIF(TRIM(issue_sources::VARCHAR), '') IS NOT NULL "
+        f"  AND {date_expr} >= CURRENT_DATE "
+        "  AND NULLIF(TRIM(issue_sources::VARCHAR), '') IS NOT NULL "
+        "GROUP BY 1, 2, 3, 4 "
+        "ORDER BY 5 DESC "
+        f"LIMIT {per_dim_limit}"
     )
-    issues_sql = f"SELECT NULLIF(TRIM(LOWER(issue_sources::VARCHAR)), '') AS issue_key, COUNT(*) AS cnt {base} GROUP BY 1 ORDER BY 2 DESC LIMIT {per_dim_limit}"
-    providers_sql = f"SELECT NULLIF(TRIM({PROVIDER_COL}::VARCHAR), '') AS provider, COUNT(*) AS cnt {base} GROUP BY 1 ORDER BY 2 DESC LIMIT {per_dim_limit}"
-    pos_sql = f"SELECT NULLIF(TRIM({POS_COL}::VARCHAR), '') AS pos, COUNT(*) AS cnt {base} GROUP BY 1 ORDER BY 2 DESC LIMIT {per_dim_limit}"
-    obs_hour_sql = "SELECT {{OBS_HOUR}} AS obs_hour, COUNT(*) AS cnt" + base + f"GROUP BY 1 ORDER BY 2 DESC LIMIT {per_dim_limit}"
-    return json.dumps({
-        "issues": json.loads(_execute_select(issues_sql)),
-        "providers": json.loads(_execute_select(providers_sql)),
-        "pos": json.loads(_execute_select(pos_sql)),
-        "obs_hour": json.loads(_execute_select(obs_hour_sql)),
-    }, indent=2)
+    return _execute_select(sql)
 
 
 def list_provider_sites(provider: str, lookback_days: int = 7, limit: int = 10) -> str:
