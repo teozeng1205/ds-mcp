@@ -65,15 +65,13 @@ def _expand_macros(sql: str) -> str:
     result = result.replace("{{OBS_HOUR}}", f"DATE_TRUNC('hour', {_build_event_ts()})")
 
     # Normalized issue label and site presence predicates
+    # Issue label: treat empty issue_sources as OK and do not fallback to 'unknown'.
+    # Use only non-empty issue_sources; callers should filter with
+    #   AND NULLIF(TRIM(issue_sources::VARCHAR), '') IS NOT NULL
+    # when aggregating.
     result = result.replace(
         "{{ISSUE_TYPE}}",
-        (
-            "COALESCE("
-            "NULLIF(TRIM(issue_reasons::VARCHAR), ''),"
-            "NULLIF(TRIM(issue_sources::VARCHAR), ''),"
-            "'unknown'"
-            ")"
-        ),
+        "NULLIF(TRIM(issue_sources::VARCHAR), '')",
     )
     result = result.replace(
         "{{IS_SITE}}",
@@ -390,7 +388,7 @@ def overview_site_issues_today(per_dim_limit: int = 5) -> str:
         f"AND {date_expr} >= CURRENT_DATE "
         "AND NULLIF(TRIM(issue_sources::VARCHAR), '') IS NOT NULL "
     )
-    issues_sql = f"SELECT NULLIF(TRIM(LOWER(COALESCE(issue_reasons::VARCHAR, issue_sources::VARCHAR))), '') AS issue_key, COUNT(*) AS cnt {base} GROUP BY 1 ORDER BY 2 DESC LIMIT {per_dim_limit}"
+    issues_sql = f"SELECT NULLIF(TRIM(LOWER(issue_sources::VARCHAR)), '') AS issue_key, COUNT(*) AS cnt {base} GROUP BY 1 ORDER BY 2 DESC LIMIT {per_dim_limit}"
     providers_sql = f"SELECT NULLIF(TRIM({PROVIDER_COL}::VARCHAR), '') AS provider, COUNT(*) AS cnt {base} GROUP BY 1 ORDER BY 2 DESC LIMIT {per_dim_limit}"
     pos_sql = f"SELECT NULLIF(TRIM({POS_COL}::VARCHAR), '') AS pos, COUNT(*) AS cnt {base} GROUP BY 1 ORDER BY 2 DESC LIMIT {per_dim_limit}"
     obs_hour_sql = "SELECT {{OBS_HOUR}} AS obs_hour, COUNT(*) AS cnt" + base + f"GROUP BY 1 ORDER BY 2 DESC LIMIT {per_dim_limit}"
