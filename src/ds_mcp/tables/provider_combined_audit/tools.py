@@ -65,13 +65,12 @@ def _expand_macros(sql: str) -> str:
     result = result.replace("{{OBS_HOUR}}", f"DATE_TRUNC('hour', {_build_event_ts()})")
 
     # Normalized issue label and site presence predicates
-    # Issue label: treat empty issue_sources as OK and do not fallback to 'unknown'.
-    # Use only non-empty issue_sources; callers should filter with
-    #   AND NULLIF(TRIM(issue_sources::VARCHAR), '') IS NOT NULL
-    # when aggregating.
+    # Issue label: prefer explicit reasons, fall back to sources; exclude empties.
+    # Callers should filter with:
+    #   COALESCE(NULLIF(TRIM(issue_reasons::VARCHAR), ''), NULLIF(TRIM(issue_sources::VARCHAR), '')) IS NOT NULL
     result = result.replace(
         "{{ISSUE_TYPE}}",
-        "NULLIF(TRIM(issue_sources::VARCHAR), '')",
+        "COALESCE(NULLIF(TRIM(issue_reasons::VARCHAR), ''), NULLIF(TRIM(issue_sources::VARCHAR), ''))",
     )
     result = result.replace(
         "{{IS_SITE}}",
@@ -264,7 +263,7 @@ def top_site_issues(provider: str, lookback_days: int = 7, limit: int = 10) -> s
         f"WHERE {PROVIDER_COL} ILIKE %s "
         f"AND {_sales_date_bound(lookback_days)} "
         f"AND {date_expr} >= CURRENT_DATE - {lookback_days} "
-        "AND NULLIF(TRIM(issue_sources::VARCHAR), '') IS NOT NULL "
+        "AND COALESCE(NULLIF(TRIM(issue_reasons::VARCHAR), ''), NULLIF(TRIM(issue_sources::VARCHAR), '')) IS NOT NULL "
         "GROUP BY 1 ORDER BY 2 DESC "
         f"LIMIT {limit}"
     )
@@ -362,7 +361,7 @@ def issue_scope_combined(
         f"AND {SITE_COL} ILIKE %s "
         f"AND {_sales_date_bound(lookback_days)} "
         f"AND {date_expr} >= CURRENT_DATE - {lookback_days} "
-        "AND NULLIF(TRIM(issue_sources::VARCHAR), '') IS NOT NULL "
+        "AND COALESCE(NULLIF(TRIM(issue_reasons::VARCHAR), ''), NULLIF(TRIM(issue_sources::VARCHAR), '')) IS NOT NULL "
     )
 
     # Additional not-null filters for specific dimensions to mirror 1D tools
@@ -395,19 +394,19 @@ def overview_site_issues_today(per_dim_limit: int = 50) -> str:
     High-level overview for today across all providers using a single SQL query.
 
     Returns a single tabular result with columns:
-      - issue_key (lowercased non-empty issue_sources)
+      - issue_key (lowercased non-empty issue_reasons/sources)
       - provider (providercode)
       - pos (point-of-sale)
       - obs_hour (event hour)
       - cnt (row count)
 
-    The query filters out rows where issue_sources is empty ("OK" rows).
+    The query filters out rows where both issue_reasons and issue_sources are empty ("OK" rows).
     """
     per_dim_limit = min(max(1, per_dim_limit), 500)
     date_expr = _date_expr(DATE_COL, "bigint")
     sql = (
         "SELECT "
-        "  NULLIF(TRIM(LOWER(issue_sources::VARCHAR)), '') AS issue_key, "
+        "  NULLIF(TRIM(LOWER(COALESCE(issue_reasons::VARCHAR, issue_sources::VARCHAR))), '') AS issue_key, "
         f"  NULLIF(TRIM({PROVIDER_COL}::VARCHAR), '') AS provider, "
         f"  NULLIF(TRIM({POS_COL}::VARCHAR), '') AS pos, "
         "  {{OBS_HOUR}} AS obs_hour, "
@@ -415,7 +414,7 @@ def overview_site_issues_today(per_dim_limit: int = 50) -> str:
         "FROM {{PCA}} "
         f"WHERE sales_date = {_today_int()} "
         f"  AND {date_expr} >= CURRENT_DATE "
-        "  AND NULLIF(TRIM(issue_sources::VARCHAR), '') IS NOT NULL "
+        "  AND COALESCE(NULLIF(TRIM(issue_reasons::VARCHAR), ''), NULLIF(TRIM(issue_sources::VARCHAR), '')) IS NOT NULL "
         "GROUP BY 1, 2, 3, 4 "
         "ORDER BY 5 DESC "
         f"LIMIT {per_dim_limit}"
@@ -443,7 +442,7 @@ def list_provider_sites(provider: str, lookback_days: int = 7, limit: int = 10) 
         f"WHERE {PROVIDER_COL} ILIKE %s "
         f"AND {_sales_date_bound(lookback_days)} "
         f"AND {date_expr} >= CURRENT_DATE - {lookback_days} "
-        "AND NULLIF(TRIM(issue_sources::VARCHAR), '') IS NOT NULL "
+        "AND COALESCE(NULLIF(TRIM(issue_reasons::VARCHAR), ''), NULLIF(TRIM(issue_sources::VARCHAR), '')) IS NOT NULL "
         f"AND NULLIF(TRIM({SITE_COL}::VARCHAR), '') IS NOT NULL "
         "GROUP BY 1 ORDER BY 2 DESC "
         f"LIMIT {limit}"
