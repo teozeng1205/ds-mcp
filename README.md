@@ -17,33 +17,57 @@ DS-MCP is a modular framework that makes it easy to expose database tables via t
 
 ## Quick Start
 
-### Installation
+Pick the path that fits your setup. The monorepo path is the easiest.
+
+### Monorepo (recommended, uses env.sh and serialized SSO)
 
 ```bash
-# Clone and navigate to repository
-cd ds-mcp
+# From the repo root (../agents)
+python -m venv .venv
+source .venv/bin/activate
 
-# Install in development mode
-pip install -e .
+# Install packages
+(cd openai-agents-python && pip install -e .)
+(cd ds-threevictors && pip install -e .)
+(cd ds-mcp && pip install -e .)
 
-# Or install dependencies manually
-pip install -r requirements.txt
+# Create env.sh at repo root if you don't have one yet
+cat > env.sh <<'EOF'
+export AWS_PROFILE=3VDEV
+export AWS_DEFAULT_REGION=us-east-1
+# export OPENAI_API_KEY=sk-...
+echo "Environment variables loaded from env.sh" >&2
+EOF
+
+# Run a server directly (stdio)
+bash ds-agents/scripts/run_mcp_provider_audit_stdio.sh
+# or
+bash ds-agents/scripts/run_mcp_market_anomalies_stdio.sh
 ```
 
-### Running the Server
+The ds‑agents wrappers source `env.sh` and reuse a shared AWS SSO login with a filesystem lock so only one browser window is opened even when multiple servers start together (e.g., Claude Desktop).
+
+### Stand‑alone (classic .env.sh)
 
 ```bash
-# Option 1: Using the run script (recommended, uses .venv python if present)
-cd scripts
-./run_server.sh
+cd ds-mcp
+python -m venv .venv && source .venv/bin/activate
+pip install -e . -r requirements.txt
 
-# Option 2: Direct execution
-source ../.env.sh
-export PYTHONPATH="$PWD/src:$PWD/..:$PYTHONPATH"
-python src/ds_mcp/server.py
+# Create .env.sh and source it (classic pattern)
+cat > .env.sh <<'EOF'
+export AWS_PROFILE=3VDEV
+export AWS_DEFAULT_REGION=us-east-1
+echo "Environment variables loaded from .env.sh" >&2
+EOF
+source .env.sh
 
-# Option 3: Development mode with MCP CLI
-mcp dev src/ds_mcp/server.py
+# Preferred: run script (uses repo .venv and serialized SSO)
+scripts/run_server.sh
+
+# Dev alternative
+# export PYTHONPATH="$PWD/src:$PWD/..:$PYTHONPATH" && python src/ds_mcp/server.py
+# Or: mcp dev src/ds_mcp/server.py
 ```
 
 ## Project Structure
@@ -91,22 +115,39 @@ ds-mcp/
 
 ### Provider Combined Audit
 - **Table**: `monitoring_prod.provider_combined_audit`
-- **Tools**: 4 (query_audit, get_table_schema, top_site_issues, issue_scope_breakdown)
-- **Description**: Audit trail of provider-level monitoring events and issues.
-- **Macros**: `{{PCA}}`, `{{OD}}`, `{{ISSUE_TYPE}}`, `{{EVENT_TS}}`, `{{OBS_HOUR}}`, `{{IS_SITE}}`, `{{IS_INVALID}}`, `{{LATEST_DATE}}`.
+- **Tools**: 6
+  - `query_audit` (ad‑hoc SQL with macros)
+  - `get_table_schema`
+  - `top_site_issues` (provider)
+  - `list_provider_sites` (provider)
+  - `issue_scope_combined` (single SQL; 2–4 dims)
+  - `overview_site_issues_today` (single SQL)
+- **Description**: Audit trail of provider‑level monitoring events and issues.
+- **Key columns**: `sales_date` (YYYYMMDD int), `providercode`, `sitecode`, `issue_reasons`, `issue_sources`.
+- **Macros**:
+  - `{{PCA}}` → fully‑qualified table name
+  - `{{EVENT_TS[:alias]}}` → event timestamp
+  - `{{OBS_HOUR}}` → hour bucket from event timestamp
+  - `{{OD}}` → `originairportcode || '-' || destinationairportcode`
+  - `{{ISSUE_TYPE}}` → `COALESCE(NULLIF(TRIM(issue_reasons), ''), NULLIF(TRIM(issue_sources), ''))`
+  - `{{IS_SITE}}` → sitecode present
 
-Examples (in Claude with DS-MCP server running):
-- Top site issues for a provider over last 7 days:
-  - Tool: `top_site_issues`
-  - Args: `{ "provider": "QL2|QF", "lookback_days": 7, "limit": 10 }`
+Examples (in Claude):
+- Top site issues (reasons or sources) for a provider over last 7 days:
+  - Tool: `top_site_issues`, Args: `{ "provider": "QL2", "lookback_days": 7, "limit": 10 }`
 
-- Scope of site issues across dimensions (hour/POS/triptype/LOS/O&D/cabin/depart):
-  - Tool: `issue_scope_breakdown`
-  - Args: `{ "provider": "QL2|QF", "lookback_days": 7, "per_dim_limit": 10 }`
+- Scope across dims in one query (hour/POS/triptype/LOS):
+  - Tool: `issue_scope_combined`, Args: `{ "provider": "QL2", "site": "QF", "dims": ["obs_hour","pos","triptype","los"], "lookback_days": 7 }`
 
-- Ad-hoc SQL with macros (site-related only, latest date):
+- Ad‑hoc SQL with macros (filter out “OK” rows):
   - Tool: `query_audit`
-  - SQL: `SELECT {{ISSUE_TYPE:issue_type}}, COUNT(*) FROM {{PCA}} WHERE {"provider"} ILIKE '%%QL2|QF%%' AND {{IS_SITE}} GROUP BY 1 ORDER BY 2 DESC LIMIT 50`
+  - SQL:
+    `SELECT {{ISSUE_TYPE}} AS issue_key, COUNT(*)
+     FROM {{PCA}}
+     WHERE providercode ILIKE '%QL2%'
+       AND COALESCE(NULLIF(TRIM(issue_reasons::VARCHAR), ''), NULLIF(TRIM(issue_sources::VARCHAR), '')) IS NOT NULL
+       AND TO_DATE(sales_date::VARCHAR,'YYYYMMDD') >= CURRENT_DATE - 7
+     GROUP BY 1 ORDER BY 2 DESC LIMIT 50`
 
  
 
@@ -180,33 +221,47 @@ See [docs/adding_tables.md](docs/adding_tables.md) for a detailed guide.
 
 ## Configuration for Claude Desktop
 
-Add to your Claude Desktop config file:
+Edit `~/Library/Application Support/Claude/claude_desktop_config.json` (macOS). Use absolute paths.
 
-- macOS: `~/Library/Application Support/Claude/claude_desktop_config.json`
-
-Minimal example to run the Market Anomalies server (adjust paths):
+### Easiest: env.sh + wrappers (monorepo)
 
 ```json
 {
   "mcpServers": {
+    "provider-combined-audit": {
+      "command": "bash",
+      "args": ["/ABS/PATH/TO/agents/ds-agents/scripts/run_mcp_provider_audit_stdio.sh"]
+    },
     "market-anomalies-v3": {
       "command": "bash",
-      "args": ["/Users/you/path/agents/ds-mcp/scripts/run_market_anomalies.sh"],
-      "env": {
-        "AWS_ACCESS_KEY_ID": "your-key",
-        "AWS_SECRET_ACCESS_KEY": "your-secret",
-        "AWS_SESSION_TOKEN": "your-token"
-      }
+      "args": ["/ABS/PATH/TO/agents/ds-agents/scripts/run_mcp_market_anomalies_stdio.sh"]
     }
   }
 }
 ```
 
 Notes:
-- Ensure `.env.sh` at the repo root exports required variables (e.g., Redshift creds, region) and that the Redshift properties file `database-analytics-redshift-serverless-reader.properties` is discoverable by the connector.
-- The server logs to stderr and exposes tools to Claude Desktop under the configured name.
-- Wrapper scripts prefer Python at `./.venv/bin/python3` (repo-local) or `../.venv/bin/python3` (parent) so the internal `threevictors` package is importable.
-- If multiple DS‑MCP servers start at once (Claude Desktop), AWS SSO login is serialized per profile by `scripts/common_aws_setup.sh` so only one browser window opens; others wait for credentials to become valid.
+- Wrappers source `env.sh` at the repo root and serialize AWS SSO login; no extra `env` needed in JSON.
+- Use absolute paths; relative paths can fail when Claude Desktop changes working directory.
+
+### Stand‑alone: classic run scripts
+
+```json
+{
+  "mcpServers": {
+    "provider-combined-audit": {
+      "command": "bash",
+      "args": ["/ABS/PATH/TO/agents/ds-mcp/scripts/run_provider_combined_audit.sh"]
+    },
+    "market-anomalies-v3": {
+      "command": "bash",
+      "args": ["/ABS/PATH/TO/agents/ds-mcp/scripts/run_market_anomalies.sh"]
+    }
+  }
+}
+```
+
+Tip: Pre‑authenticate once in a terminal to avoid any browser prompt on startup: `aws sso login --profile 3VDEV`.
 
 ## Development
 
