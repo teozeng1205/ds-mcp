@@ -522,3 +522,131 @@ def issue_scope_quick_by_site(provider: str, site: str, lookback_days: int = 3, 
 
     except Exception as e:
         return json.dumps({"error": str(e)}, indent=2)
+
+
+def issue_scope_by_site_dimensions(
+    provider: str,
+    site: str,
+    dims: List[str],
+    lookback_days: int = 3,
+    per_dim_limit: int = 5,
+) -> str:
+    """
+    Site-scoped scope across requested dimensions only (fast, partition-pruned).
+    Args: provider, site, dims (subset of: obs_hour,pos,od,cabin,triptype,los,depart_week,depart_dow),
+          lookback_days (default 3), per_dim_limit (default 5, max 25).
+    Returns JSON: filters, total_count, available_dimensions, breakdowns.
+    """
+    per_dim_limit = min(max(1, per_dim_limit), 25)
+    dims_req = {d.strip().lower() for d in dims or []}
+    allowed = {
+        "obs_hour",
+        "pos",
+        "od",
+        "cabin",
+        "triptype",
+        "los",
+        "depart_week",
+        "depart_dow",
+    }
+    dims_req = [d for d in dims_req if d in allowed]
+    if not dims_req:
+        return json.dumps({"error": "No valid dims requested"}, indent=2)
+
+    cols = _get_columns()
+    provider_col = _pick_column(cols, ["providercode", "provider"]) or "providercode"
+    site_col = _pick_column(cols, ["sitecode", "site", "site_code"]) or "sitecode"
+    date_col = _pick_column(cols, ["scheduledate"]) or "scheduledate"
+    date_expr = _date_expr(date_col, cols.get(date_col, ""))
+
+    pos_col = _pick_column(cols, ["pos", "point_of_sale"])
+    cabin_col = _pick_column(cols, ["cabin", "bookingcabin"])
+    triptype_col = _pick_column(cols, ["triptype", "trip_type"])
+    los_col = _pick_column(cols, ["los", "lengthofstay"])
+    depart_col = _pick_column(cols, ["departdate", "legdeparturedate"])
+    has_od = "originairportcode" in cols and "destinationairportcode" in cols
+
+    provider_filter = f"{provider_col} ILIKE %s"
+    site_filter = f"{site_col} ILIKE %s"
+    params = [f"%{provider}%", f"%{site}%"]
+
+    base_where = f"""
+    WHERE {provider_filter}
+      AND {site_filter}
+      AND {_sales_date_bound(lookback_days)}
+      AND {date_expr} >= CURRENT_DATE - {lookback_days}
+      AND {_build_site_filter()}
+    """
+
+    filters_output = {
+        "provider_like": provider,
+        "site_like": site,
+        "issue_type": "site_related",
+        "lookback_days": lookback_days,
+        "requested_dims": dims_req,
+    }
+
+    result = {
+        "filters": filters_output,
+        "total_count": 0,
+        "available_dimensions": [],
+        "breakdowns": {},
+    }
+
+    def add_rows(name: str, rows):
+        if rows:
+            result["breakdowns"][name] = rows
+            result["available_dimensions"].append(name)
+
+    try:
+        conn = _get_conn()
+
+        with conn.cursor() as cur:
+            _safe_execute(cur, f"SELECT COUNT(*) FROM {TABLE_NAME} {base_where}", tuple(params))
+            result["total_count"] = int(cur.fetchone()[0])
+
+        def run_dimension(name: str, select_expr: str, extra_where: str = ""):
+            sql = f"""
+            SELECT {select_expr} AS bucket, COUNT(*) AS cnt
+            FROM {TABLE_NAME}
+            {base_where} {extra_where}
+            GROUP BY 1
+            ORDER BY 2 DESC
+            LIMIT {per_dim_limit}
+            """
+            with conn.cursor() as cur:
+                _safe_execute(cur, sql, tuple(params))
+                rows = []
+                for bucket, cnt in cur.fetchall():
+                    pct = cnt / result["total_count"] if result["total_count"] > 0 else 0
+                    rows.append({
+                        "bucket": str(bucket) if bucket is not None else "null",
+                        "count": int(cnt),
+                        "pct": round(pct, 4),
+                    })
+                add_rows(name, rows)
+
+        # Dispatch per requested dim
+        if "obs_hour" in dims_req:
+            run_dimension("obs_hour", f"DATE_TRUNC('hour', {_build_event_ts()})")
+        if "pos" in dims_req and pos_col:
+            run_dimension("pos", f"NULLIF(TRIM({pos_col}::VARCHAR), '')", f"AND {pos_col} IS NOT NULL")
+        if "od" in dims_req and has_od:
+            run_dimension("od", "(originairportcode || '-' || destinationairportcode)")
+        if "cabin" in dims_req and cabin_col:
+            run_dimension("cabin", f"NULLIF(TRIM({cabin_col}::VARCHAR), '')", f"AND {cabin_col} IS NOT NULL")
+        if "triptype" in dims_req and triptype_col:
+            run_dimension("triptype", f"NULLIF(TRIM({triptype_col}::VARCHAR), '')", f"AND {triptype_col} IS NOT NULL")
+        if "los" in dims_req and los_col:
+            run_dimension("los", f"{los_col}::VARCHAR", f"AND {los_col} IS NOT NULL")
+        if "depart_week" in dims_req and depart_col:
+            depart_expr = _date_expr(depart_col, cols.get(depart_col, ""))
+            run_dimension("depart_week", f"DATE_TRUNC('week', {depart_expr})")
+        if "depart_dow" in dims_req and depart_col:
+            depart_expr = _date_expr(depart_col, cols.get(depart_col, ""))
+            run_dimension("depart_dow", f"EXTRACT(DOW FROM {depart_expr})::INT")
+
+        return json.dumps(result, indent=2)
+
+    except Exception as e:
+        return json.dumps({"error": str(e)}, indent=2)

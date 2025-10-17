@@ -31,7 +31,7 @@ def get_table_config() -> TableConfig:
             tools.get_table_schema,
             tools.top_site_issues,
             tools.issue_scope_quick_by_site,
-            # Note: heavier breakdown tools removed for simplicity and reliability.
+            tools.issue_scope_by_site_dimensions,
         ],
         metadata={
             "primary_key": "unknown",

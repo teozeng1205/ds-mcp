@@ -11,6 +11,7 @@ from ds_mcp.tables.provider_combined_audit.tools import (
     get_table_schema,
     top_site_issues,
     issue_scope_quick_by_site,
+    issue_scope_by_site_dimensions,
 )
 
 __all__ = [
@@ -19,6 +20,7 @@ __all__ = [
     "get_table_schema",
     "top_site_issues",
     "issue_scope_quick_by_site",
+    "issue_scope_by_site_dimensions",
 ]
 
 
