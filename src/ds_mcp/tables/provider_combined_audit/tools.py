@@ -273,36 +273,13 @@ def top_site_issues(provider: str, lookback_days: int = 7, limit: int = 10) -> s
 
 def issue_scope_quick_by_site(provider: str, site: str, lookback_days: int = 3, per_dim_limit: int = 5) -> str:
     """
-    Quick scope for provider+site.
+    DEPRECATED: Quick scope for provider+site.
 
-    Args:
-        provider: ILIKE pattern for providercode.
-        site: ILIKE pattern for sitecode.
-        lookback_days: Window in days.
-        per_dim_limit: Max buckets per dimension (1–25).
-
-    Returns:
-        JSON object with two sections:
-          - obs_hour: {columns, rows}
-          - pos: {columns, rows}
+    This wrapper now calls issue_scope_combined with dims ['obs_hour','pos'] and returns
+    a single table to replace the former multi-call behavior.
     """
-    per_dim_limit = min(max(1, per_dim_limit), 25)
-    date_expr = _date_expr(DATE_COL, "bigint")
-    base = (
-        " FROM {{PCA}} "
-        f"WHERE {PROVIDER_COL} ILIKE %s "
-        f"AND {SITE_COL} ILIKE %s "
-        f"AND {_sales_date_bound(lookback_days)} "
-        f"AND {date_expr} >= CURRENT_DATE - {lookback_days} "
-        "AND NULLIF(TRIM(issue_sources::VARCHAR), '') IS NOT NULL "
-    )
-    params = [f"%{provider}%", f"%{site}%"]
-    obs_sql = "SELECT {{OBS_HOUR}} AS bucket, COUNT(*) AS cnt" + base + f"GROUP BY 1 ORDER BY 2 DESC LIMIT {per_dim_limit}"
-    pos_sql = f"SELECT NULLIF(TRIM({POS_COL}::VARCHAR), '') AS bucket, COUNT(*) AS cnt{base}AND {POS_COL} IS NOT NULL GROUP BY 1 ORDER BY 2 DESC LIMIT {per_dim_limit}"
-    return json.dumps({
-        "obs_hour": json.loads(_execute_select(obs_sql, params)),
-        "pos": json.loads(_execute_select(pos_sql, params)),
-    }, indent=2)
+    limit = min(max(1, per_dim_limit), 50)
+    return issue_scope_combined(provider=provider, site=site, dims=["obs_hour", "pos"], lookback_days=lookback_days, limit=limit)
 
 
 def issue_scope_by_site_dimensions(
@@ -313,61 +290,13 @@ def issue_scope_by_site_dimensions(
     per_dim_limit: int = 5,
 ) -> str:
     """
-    Scope issues for provider+site across selected dimensions.
+    DEPRECATED: Use issue_scope_combined instead.
 
-    Args:
-        provider: ILIKE pattern for providercode.
-        site: ILIKE pattern for sitecode.
-        dims: Any of [obs_hour, pos, od, cabin, triptype, los, depart_week, depart_dow].
-        lookback_days: Window in days.
-        per_dim_limit: Max buckets per dimension (1–25).
-
-    Returns:
-        JSON mapping {dimension -> {columns, rows}} for requested dims.
+    This wrapper now calls issue_scope_combined with the provided dims and returns
+    a single table replacing the former per-dimension outputs.
     """
-    per_dim_limit = min(max(1, per_dim_limit), 25)
-    dims_req = {d.strip().lower() for d in (dims or [])}
-    allowed = {"obs_hour", "pos", "od", "cabin", "triptype", "los", "depart_week", "depart_dow"}
-    dims_req = [d for d in dims_req if d in allowed]
-    if not dims_req:
-        return json.dumps({"error": "No valid dims requested"}, indent=2)
-
-    date_expr = _date_expr(DATE_COL, "bigint")
-    base = (
-        " FROM {{PCA}} "
-        f"WHERE {PROVIDER_COL} ILIKE %s "
-        f"AND {SITE_COL} ILIKE %s "
-        f"AND {_sales_date_bound(lookback_days)} "
-        f"AND {date_expr} >= CURRENT_DATE - {lookback_days} "
-        "AND NULLIF(TRIM(issue_sources::VARCHAR), '') IS NOT NULL "
-    )
-    params = [f"%{provider}%", f"%{site}%"]
-
-    select_map = {
-        "obs_hour": "{{OBS_HOUR}}",
-        "pos": f"NULLIF(TRIM({POS_COL}::VARCHAR), '')",
-        "od": "(originairportcode || '-' || destinationairportcode)",
-        "cabin": f"NULLIF(TRIM({CABIN_COL}::VARCHAR), '')",
-        "triptype": f"NULLIF(TRIM({TRIPTYPE_COL}::VARCHAR), '')",
-        "los": f"{LOS_COL}::VARCHAR",
-        "depart_week": f"DATE_TRUNC('week', TO_DATE({DEPARTDATE_COL}::VARCHAR, 'YYYYMMDD'))",
-        "depart_dow": f"EXTRACT(DOW FROM TO_DATE({DEPARTDATE_COL}::VARCHAR, 'YYYYMMDD'))::INT",
-    }
-    results: Dict[str, dict] = {}
-    for d in dims_req:
-        extra = ""
-        if d in {"pos", "cabin", "triptype", "los"}:
-            column = {
-                "pos": POS_COL,
-                "cabin": CABIN_COL,
-                "triptype": TRIPTYPE_COL,
-                "los": LOS_COL,
-            }[d]
-            extra = f" AND {column} IS NOT NULL"
-        sql = f"SELECT {select_map[d]} AS bucket, COUNT(*) AS cnt{base}{extra}GROUP BY 1 ORDER BY 2 DESC LIMIT {per_dim_limit}"
-        results[d] = json.loads(_execute_select(sql, params))
-
-    return json.dumps(results, indent=2)
+    limit = min(max(1, per_dim_limit), 1000)
+    return issue_scope_combined(provider=provider, site=site, dims=dims, lookback_days=lookback_days, limit=limit)
 
 
 def issue_scope_combined(
