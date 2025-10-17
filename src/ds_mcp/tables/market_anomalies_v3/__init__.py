@@ -10,9 +10,16 @@ from ds_mcp.tables.market_anomalies_v3.tools import (
     query_anomalies,
     get_table_schema,
     get_available_customers,
+    overview_anomalies_today,
 )
 
-__all__ = ["register_table", "query_anomalies", "get_table_schema", "get_available_customers"]
+__all__ = [
+    "register_table",
+    "query_anomalies",
+    "get_table_schema",
+    "get_available_customers",
+    "overview_anomalies_today",
+]
 
 
 def register_table(registry: TableRegistry) -> None:

@@ -42,7 +42,6 @@ def main():
 
     log.info(f"Registered {len(registry)} table")
 
-    # Register all tools from the table
     for table in registry.get_all_tables():
         log.info(f"Registering {len(table.tools)} tools from {table.display_name}")
 
@@ -59,4 +58,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

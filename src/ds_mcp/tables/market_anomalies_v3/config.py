@@ -27,6 +27,7 @@ def get_table_config() -> TableConfig:
             tools.query_anomalies,
             tools.get_table_schema,
             tools.get_available_customers,
+            tools.overview_anomalies_today,
         ],
         metadata={
             "version": "3.0",

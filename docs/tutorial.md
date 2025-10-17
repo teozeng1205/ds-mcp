@@ -237,8 +237,12 @@ This tutorial will primarily focus on tools.
     """
             forecasts.append(forecast)
 
-        return "\n---\n".join(forecasts)
+    return "\n---\n".join(forecasts)
     ```
+
+    ### Notes for Claude Desktop
+
+    When connecting DS‑MCP servers to Claude Desktop, keep your tools minimal and predictable. In this repository, tools perform macro expansion and safety checks inside each tool function (e.g., `query_audit`, `query_anomalies`). This keeps behavior consistent regardless of host environment.
 
     ### Running the server
 
