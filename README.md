@@ -206,6 +206,7 @@ Notes:
 - Ensure `.env.sh` at the repo root exports required variables (e.g., Redshift creds, region) and that the Redshift properties file `database-analytics-redshift-serverless-reader.properties` is discoverable by the connector.
 - The server logs to stderr and exposes tools to Claude Desktop under the configured name.
 - Wrapper scripts prefer Python at `./.venv/bin/python3` (repo-local) or `../.venv/bin/python3` (parent) so the internal `threevictors` package is importable.
+- If multiple DS‑MCP servers start at once (Claude Desktop), AWS SSO login is serialized per profile by `scripts/common_aws_setup.sh` so only one browser window opens; others wait for credentials to become valid.
 
 ## Development
 

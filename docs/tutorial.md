@@ -1978,9 +1978,24 @@ To override the default variables or provide your own, you can specify an `env` 
     "env": {
       "MYAPP_API_KEY": "some_key"
     }
-  }
+}
 }
 ```
+
+### Concurrent AWS SSO logins (Claude Desktop)
+
+When Claude Desktop launches, it starts all configured MCP servers at the same time. If your servers need AWS credentials and the current session has expired, each one may try to run `aws sso login` at startup. That can open multiple browser windows and often leads to confusing failures.
+
+To prevent this, DS‑MCP’s startup scripts now serialize AWS SSO login per profile:
+
+- Only one server initiates the browser login (per `AWS_PROFILE`).
+- Other servers wait until credentials become valid, then continue automatically.
+- A lightweight filesystem lock at `${XDG_CACHE_HOME:-$HOME/.cache}/ds-mcp/locks/aws-sso-<profile>.lock` coordinates this.
+
+Tips:
+- Pre‑authenticate once before launching Claude: `aws sso login --profile 3VDEV` (or your profile).
+- Ensure `aws` CLI is installed and on `PATH` in the Claude process environment.
+- You can set `AWS_PROFILE` per server in `claude_desktop_config.json` under each server’s `env` block.
 
 ### Server initialization
 
