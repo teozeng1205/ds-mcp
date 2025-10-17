@@ -246,6 +246,7 @@ def query_audit(sql_query: str) -> str:
         # Execute query
         conn = _get_conn()
         with conn.cursor() as cur:
+            log.info(f"SQL[query_audit]: {expanded_sql.strip()}")
             _safe_execute(cur, expanded_sql)
             columns = [desc[0] for desc in cur.description]
             rows = []
@@ -276,6 +277,11 @@ def get_table_schema() -> str:
     cols = _get_columns()
     columns = [{"column_name": k, "data_type": v} for k, v in cols.items()]
 
+    schema_sql = (
+        "SELECT column_name, data_type, character_maximum_length, is_nullable "
+        "FROM svv_columns WHERE table_schema = 'monitoring_prod' AND table_name = 'provider_combined_audit' "
+        "ORDER BY ordinal_position"
+    )
     return json.dumps({
         "table": TABLE_NAME,
         "columns": columns,
@@ -284,7 +290,8 @@ def get_table_schema() -> str:
             "date_fields": ["scheduledate", "actualscheduletimestamp", "observationtimestamp"],
             "search_dimensions": ["pos", "cabin", "originairportcode", "destinationairportcode"],
             "travel_dates": ["departdate", "returndate"]
-        }
+        },
+        "sql": schema_sql
     }, indent=2)
 
 
@@ -327,6 +334,7 @@ def top_site_issues(provider: str, lookback_days: int = 7, limit: int = 10) -> s
     try:
         conn = _get_conn()
         with conn.cursor() as cur:
+            log.info(f"SQL[top_site_issues]: {sql.strip()} | params={provider_params}")
             _safe_execute(cur, sql, tuple(provider_params))
             rows = [{"issue_key": r[0], "count": int(r[1])} for r in cur.fetchall()]
 
@@ -339,7 +347,8 @@ def top_site_issues(provider: str, lookback_days: int = 7, limit: int = 10) -> s
             return json.dumps({
                 "filters": filters_output,
                 "rows": rows,
-                "row_count": len(rows)
+                "row_count": len(rows),
+                "sql": sql
             }, indent=2)
     except Exception as e:
         return json.dumps({"error": str(e)}, indent=2)
@@ -396,8 +405,10 @@ def issue_scope_breakdown_by_site(provider: str, site: str, lookback_days: int =
     try:
         conn = _get_conn()
 
+        executed_sql = {"total_count": f"SELECT COUNT(*) FROM {TABLE_NAME} {base_where}"}
         with conn.cursor() as cur:
-            _safe_execute(cur, f"SELECT COUNT(*) FROM {TABLE_NAME} {base_where}", tuple(params))
+            log.info(f"SQL[issue_scope_quick_by_site/total]: {executed_sql['total_count'].strip()} | params={params}")
+            _safe_execute(cur, executed_sql["total_count"], tuple(params))
             result["total_count"] = int(cur.fetchone()[0])
 
         def run_dimension(name: str, select_expr: str, extra_where: str = ""):
@@ -411,6 +422,8 @@ def issue_scope_breakdown_by_site(provider: str, site: str, lookback_days: int =
             """
             try:
                 with conn.cursor() as cur:
+                    executed_sql[name] = sql
+                    log.info(f"SQL[issue_scope_quick_by_site/{name}]: {sql.strip()} | params={params}")
                     _safe_execute(cur, sql, tuple(params))
                     rows = []
                     for bucket, cnt in cur.fetchall():
@@ -437,6 +450,7 @@ def issue_scope_breakdown_by_site(provider: str, site: str, lookback_days: int =
             depart_expr = _date_expr(depart_col, cols.get(depart_col, ""))
             run_dimension("depart_week", f"DATE_TRUNC('week', {depart_expr})")
 
+        result["executed_sql"] = executed_sql
         return json.dumps(result, indent=2)
 
     except Exception as e:
@@ -489,7 +503,9 @@ def issue_scope_quick_by_site(provider: str, site: str, lookback_days: int = 3, 
         conn = _get_conn()
 
         with conn.cursor() as cur:
-            _safe_execute(cur, f"SELECT COUNT(*) FROM {TABLE_NAME} {base_where}", tuple(params))
+            total_sql = f"SELECT COUNT(*) FROM {TABLE_NAME} {base_where}"
+            log.info(f"SQL[issue_scope_by_site_dimensions/total]: {total_sql.strip()} | params={params}")
+            _safe_execute(cur, total_sql, tuple(params))
             result["total_count"] = int(cur.fetchone()[0])
 
         def run_dimension(name: str, select_expr: str, extra_where: str = ""):
@@ -610,6 +626,7 @@ def issue_scope_by_site_dimensions(
             _safe_execute(cur, f"SELECT COUNT(*) FROM {TABLE_NAME} {base_where}", tuple(params))
             result["total_count"] = int(cur.fetchone()[0])
 
+        executed_sql = {"total_count": total_sql}
         def run_dimension(name: str, select_expr: str, extra_where: str = ""):
             sql = f"""
             SELECT {select_expr} AS bucket, COUNT(*) AS cnt
@@ -620,6 +637,8 @@ def issue_scope_by_site_dimensions(
             LIMIT {per_dim_limit}
             """
             with conn.cursor() as cur:
+                executed_sql[name] = sql
+                log.info(f"SQL[issue_scope_by_site_dimensions/{name}]: {sql.strip()} | params={params}")
                 _safe_execute(cur, sql, tuple(params))
                 rows = []
                 for bucket, cnt in cur.fetchall():
@@ -651,6 +670,7 @@ def issue_scope_by_site_dimensions(
             depart_expr = _date_expr(depart_col, cols.get(depart_col, ""))
             run_dimension("depart_dow", f"EXTRACT(DOW FROM {depart_expr})::INT")
 
+        result["executed_sql"] = executed_sql
         return json.dumps(result, indent=2)
 
     except Exception as e:
@@ -689,13 +709,18 @@ def overview_site_issues_today(per_dim_limit: int = 5) -> str:
 
         # total_count and date
         with conn.cursor() as cur:
-            _safe_execute(cur, f"SELECT {today_expr} AS yyyymmdd, COUNT(*) FROM {TABLE_NAME} {base_where}")
+            total_sql = f"SELECT {today_expr} AS yyyymmdd, COUNT(*) FROM {TABLE_NAME} {base_where}"
+            log.info(f"SQL[overview_site_issues_today/total]: {total_sql.strip()}")
+            _safe_execute(cur, total_sql)
             row = cur.fetchone()
             result["date"] = int(row[0]) if row and row[0] is not None else None
             result["total_count"] = int(row[1]) if row and row[1] is not None else 0
 
+        executed_sql = {"total_count": total_sql}
         def run_dim(name: str, sql: str):
             with conn.cursor() as cur:
+                executed_sql[name] = sql
+                log.info(f"SQL[overview_site_issues_today/{name}]: {sql.strip()}")
                 _safe_execute(cur, sql)
                 rows = []
                 for bucket, cnt in cur.fetchall():
@@ -751,6 +776,7 @@ def overview_site_issues_today(per_dim_limit: int = 5) -> str:
         """
         run_dim("obs_hour", obs_hour_sql)
 
+        result["executed_sql"] = executed_sql
         return json.dumps(result, indent=2)
 
     except Exception as e:
