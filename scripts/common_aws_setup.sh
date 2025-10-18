@@ -59,9 +59,11 @@ if command -v aws >/dev/null 2>&1; then
       trap 'rmdir "$LOCK_DIR" 2>/dev/null || true' EXIT INT TERM
       echo "⚠ AWS credentials not found or expired" >&2
       echo "Attempting AWS SSO login for profile: $AWS_PROFILE" >&2
-      if aws sso login --profile "$AWS_PROFILE" 2>&1; then
-        echo "✓ AWS SSO login successful" >&2
-      else
+        # IMPORTANT for MCP stdio servers: never write to stdout. Redirect aws CLI stdout to stderr.
+        # This prevents corrupting JSON-RPC messages when hosts spawn the server and expect clean stdout.
+        if aws sso login --profile "$AWS_PROFILE" 1>&2; then
+            echo "✓ AWS SSO login successful" >&2
+        else
         echo "" >&2
         echo "ERROR: AWS SSO login failed for profile: $AWS_PROFILE" >&2
         echo "" >&2
