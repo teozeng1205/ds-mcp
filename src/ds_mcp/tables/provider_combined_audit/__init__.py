@@ -6,24 +6,8 @@ Provides MCP tools for querying and analyzing the monitoring_prod.provider_combi
 
 from ds_mcp.core.registry import TableRegistry
 from ds_mcp.tables.provider_combined_audit.config import get_table_config
-from ds_mcp.tables.provider_combined_audit.tools import (
-    query_audit,
-    get_table_schema,
-    top_site_issues,
-    list_provider_sites,
-    issue_scope_combined,
-    overview_site_issues_today,
-)
 
-__all__ = [
-    "register_table",
-    "query_audit",
-    "get_table_schema",
-    "top_site_issues",
-    "list_provider_sites",
-    "issue_scope_combined",
-    "overview_site_issues_today",
-]
+__all__ = ["register_table"]
 
 
 def register_table(registry: TableRegistry) -> None:
