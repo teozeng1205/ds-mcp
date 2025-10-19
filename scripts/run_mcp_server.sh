@@ -23,7 +23,7 @@ fi
 # shellcheck disable=SC1090
 source "$ENV_FILE"
 
-PY="python3"
+PY="${PYTHON:-python}"
 
 # AWS credentials are expected to be provided via environment or mounted
 # ~/.aws config. Interactive SSO setup has been removed for simplicity.
