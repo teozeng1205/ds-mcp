@@ -103,9 +103,6 @@ Examples:
 # One-table servers
 bash ds-mcp/scripts/run_mcp_server.sh provider
 bash ds-mcp/scripts/run_mcp_server.sh anomalies
-
-# Multi-table server (if you add more tables)
-bash ds-mcp/scripts/run_server.sh
 ```
 
 ### 5. Next steps

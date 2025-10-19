@@ -309,7 +309,7 @@ python tests/test_my_new_table.py
 
 ```bash
 cd scripts
-./run_server.sh
+python -m ds_mcp.servers.your_table_server
 ```
 
 Your new table tools should now be available!

@@ -216,18 +216,18 @@ python test_tools.py
 
 ## Running the Server
 
-### Development Mode
+### Development Mode (one-table servers)
 
 ```bash
-# Option 1: Direct execution
-./run_server.sh
+# Provider Combined Audit (stdio)
+bash scripts/run_mcp_server.sh provider
 
-# Option 2: Python
-source ../.env.sh
-python server.py
+# Market Anomalies V3 (stdio)
+bash scripts/run_mcp_server.sh anomalies
 
-# Option 3: MCP CLI
-mcp dev server.py
+# Or via Python modules
+python -m ds_mcp.servers.provider_combined_audit_server
+python -m ds_mcp.servers.market_anomalies_server
 ```
 
 ### Connecting from an MCP client

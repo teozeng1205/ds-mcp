@@ -25,12 +25,8 @@ source "$ENV_FILE"
 
 PY="python3"
 
-# Skip interactive AWS SSO in containers; rely on mounted ~/.aws or env creds.
-# To enable serialized SSO login, set DS_MCP_AWS_SETUP=1.
-if [ "${DS_MCP_AWS_SETUP:-}" = "1" ]; then
-  # shellcheck disable=SC1090
-  source "$SCRIPT_DIR/common_aws_setup.sh"
-fi
+# AWS credentials are expected to be provided via environment or mounted
+# ~/.aws config. Interactive SSO setup has been removed for simplicity.
 
 case "$SERVER_KIND" in
   provider)
