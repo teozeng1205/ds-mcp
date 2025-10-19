@@ -8,10 +8,6 @@ This server automatically registers all available tables and their tools.
 
 import sys
 import os
-
-# Add parent directory to path to import threevictors
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../..'))
-
 from ds_mcp.servers.base_server import run_server
 
 

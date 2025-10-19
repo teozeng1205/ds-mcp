@@ -15,10 +15,7 @@ Environment requirements:
 
 import json
 import sys
-import os
 from datetime import datetime, timezone
-
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
 
 from ds_mcp.tables.market_anomalies_v3.tools import (
     get_table_schema,

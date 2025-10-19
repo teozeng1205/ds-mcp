@@ -1,13 +1,10 @@
 #!/usr/bin/env python3
 """
-Test script to verify all imports work correctly
+Test script to verify imports.
+Requires ds-mcp and threevictors installed in the active environment.
 """
 
 import sys
-import os
-
-# Add parent directory to path
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 print("Testing imports...")
 

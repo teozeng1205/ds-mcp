@@ -1,14 +1,10 @@
 #!/usr/bin/env python3
 """
 Test the table registry system.
+Requires ds-mcp to be installed (e.g., `pip install -e .`).
 """
 
 import sys
-import os
-
-# Add src directory to path
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../..'))
 
 print("Testing DS-MCP Registry System...")
 print("=" * 80)
