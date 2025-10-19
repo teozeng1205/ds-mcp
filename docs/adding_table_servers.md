@@ -53,8 +53,14 @@ register_table(registry)
 
 ```bash
 cd scripts
-cp run_table_template.sh run_your_table.sh
-chmod +x run_your_table.sh
+# Create a minimal launch script if desired (optional)
+cat > scripts/run_your_table.sh <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+PY=python3
+exec "$PY" "$ROOT_DIR/src/ds_mcp/servers/your_table_server.py"
+EOF
+chmod +x scripts/run_your_table.sh
 ```
 
 **Edit `run_your_table.sh`:**
@@ -292,7 +298,7 @@ After successfully adding your table server:
 
 - **Template Files**:
   - `src/ds_mcp/servers/table_server_template.py`
-  - `scripts/run_table_template.sh`
+ 
 
 - **Examples**:
   - `src/ds_mcp/servers/market_anomalies_server.py`

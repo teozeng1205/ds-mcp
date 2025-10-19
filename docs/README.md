@@ -315,7 +315,6 @@ down_trends = get_trending_anomalies("AS", 20251013, direction="down")
 ```
 ds-mcp/
 ├── server.py           # Main MCP server (14 tools)
-├── explore_table.py    # Table exploration script
 ├── test_tools.py       # Tool testing script
 ├── test_imports.py     # Import validation
 ├── requirements.txt    # Dependencies
@@ -388,7 +387,6 @@ def my_new_tool(customer: str, sales_date: int) -> str:
 echo $AWS_ACCESS_KEY_ID
 
 # Test database connection
-python explore_table.py
 
 # Check S3 config access
 aws s3 ls s3://config-server-*/
@@ -418,7 +416,6 @@ python test_imports.py
 python test_imports.py
 
 # Test database exploration
-python explore_table.py
 
 # Test MCP tools
 python test_tools.py
