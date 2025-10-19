@@ -230,28 +230,9 @@ python server.py
 mcp dev server.py
 ```
 
-### Production with Claude Desktop
+### Connecting from an MCP client
 
-Add to your Claude Desktop configuration file:
-
-**macOS**: `~/Library/Application Support/Claude/claude_desktop_config.json`
-**Windows**: `%APPDATA%\Claude\claude_desktop_config.json`
-
-```json
-{
-  "mcpServers": {
-    "market-anomalies": {
-      "command": "python",
-      "args": ["/full/path/to/agents/ds-mcp/server.py"],
-      "env": {
-        "AWS_ACCESS_KEY_ID": "your-access-key",
-        "AWS_SECRET_ACCESS_KEY": "your-secret-key",
-        "AWS_SESSION_TOKEN": "your-session-token"
-      }
-    }
-  }
-}
-```
+Use your preferred MCP client to launch or connect to the server. Configure environment variables as needed for AWS and credentials.
 
 ## Usage Examples
 
@@ -427,7 +408,7 @@ python test_imports.py
 
 - Ensure no stdout pollution (use stderr for logging)
 - Test with `mcp dev server.py` first
-- Check Claude Desktop logs
+- Check client logs
 - Verify JSON response format
 
 ## Testing

@@ -3,7 +3,7 @@
 Market Anomalies V3 MCP Server Entry Point
 
 This server exposes ONLY the market_level_anomalies_v3 table.
-Used when you want isolated access to just this table in Claude Desktop.
+Use when you want isolated access to just this table via MCP.
 """
 
 import sys

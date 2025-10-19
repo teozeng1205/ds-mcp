@@ -3,7 +3,7 @@
 Provider Combined Audit MCP Server Entry Point
 
 This server exposes ONLY the monitoring_prod.provider_combined_audit table.
-Use when you want isolated access to just this table in Claude Desktop.
+Use when you want isolated access to just this table via MCP.
 """
 
 import sys

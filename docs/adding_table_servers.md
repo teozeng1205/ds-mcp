@@ -88,41 +88,23 @@ INFO Total tools registered: X
 
 Press Ctrl+C to stop.
 
-### 4. Add to Claude Desktop (1 minute)
+### 4. Connect from a client (1 minute)
 
-**Edit:** `~/Library/Application Support/Claude/claude_desktop_config.json`
+Run your server and connect with any MCP client (e.g., `mcp` CLI or your own client).
 
-```json
-{
-  "mcpServers": {
-    "ds-mcp-all-tables": {
-      "command": "bash",
-      "args": ["/full/path/to/ds-mcp/scripts/run_server.sh"]
-    },
-    "market-anomalies-v3": {
-      "command": "bash",
-      "args": ["/full/path/to/ds-mcp/scripts/run_mcp_server.sh", "anomalies"]
-    },
-    "your-table": {
-      "command": "bash",
-      "args": ["/full/path/to/ds-mcp/scripts/run_mcp_server.sh", "your-server-kind"]
-    }
-  }
-}
-```
-
-**Get full path:**
+Examples:
 ```bash
-cd /path/to/ds-mcp/scripts
-pwd
-# Copy the output and use it in the config
+# One-table servers
+bash ds-mcp/scripts/run_mcp_server.sh provider
+bash ds-mcp/scripts/run_mcp_server.sh anomalies
+
+# Multi-table server (if you add more tables)
+bash ds-mcp/scripts/run_server.sh
 ```
 
-### 5. Restart Claude Desktop
+### 5. Next steps
 
-1. Quit Claude Desktop (Cmd+Q on macOS)
-2. Reopen Claude Desktop
-3. Look for your table tools in the MCP tools list
+Use your preferred MCP client (or the `mcp` CLI) to connect and exercise tools.
 
 ## Complete Example
 
@@ -199,17 +181,8 @@ fi
 exec "$PYTHON" "$ROOT_DIR/src/ds_mcp/servers/sales_data_server.py"
 ```
 
-**3. Claude config:**
-```json
-{
-  "mcpServers": {
-    "sales-data": {
-      "command": "bash",
-      "args": ["/Users/you/agents/ds-mcp/scripts/run_sales_data.sh"]
-    }
-  }
-}
-```
+**3. Client configuration:**
+Configure your MCP client to launch the server script you created above.
 
 ## Naming Conventions
 
@@ -223,7 +196,7 @@ exec "$PYTHON" "$ROOT_DIR/src/ds_mcp/servers/sales_data_server.py"
 
 ## Checklist
 
-Before adding to Claude Desktop, verify:
+Before connecting from a client, verify:
 
 - [ ] Server file created from template
 - [ ] Import statement updated with your table
@@ -233,8 +206,8 @@ Before adding to Claude Desktop, verify:
 - [ ] Launch script is executable (`chmod +x`)
 - [ ] Script runs without errors
 - [ ] Tools are listed in output
-- [ ] Full path used in Claude config
-- [ ] Config file is valid JSON
+- [ ] Server path is correct and executable
+- [ ] Client configuration is valid
 
 ## Troubleshooting
 
@@ -259,12 +232,12 @@ python3 -m py_compile src/ds_mcp/servers/your_table_server.py
 
 ### Tools Not Appearing
 
-**Problem**: Server starts but Claude doesn't see tools
+**Problem**: Server starts but client doesn't see tools
 
 **Solution**:
-1. Check Claude Desktop logs: `tail -f ~/Library/Logs/Claude/mcp*.log`
-2. Verify tools are registered in output
-3. Restart Claude Desktop completely (Cmd+Q)
+1. Check client logs and server stderr
+2. Verify tools are registered in server startup output
+3. Restart the client and server
 
 ### Script Permission Denied
 
@@ -310,7 +283,7 @@ connector = DatabaseConnectorFactory.get_connector("mysql")  # or "analytics"
 
 After successfully adding your table server:
 
-1. **Test thoroughly**: Try all tools in Claude
+1. **Test thoroughly**: Try all tools from your client
 2. **Document tools**: Update your table's README
 3. **Share patterns**: If you create useful tools, share with team
 4. **Monitor logs**: Check for any errors or warnings
