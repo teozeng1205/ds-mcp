@@ -23,31 +23,24 @@ fi
 # shellcheck disable=SC1090
 source "$ENV_FILE"
 
-# Required: repo-level .venv Python
-PY="$REPO_ROOT/.venv/bin/python3"
-if [ ! -x "$PY" ]; then
-  echo "Error: repo .venv not found at $REPO_ROOT/.venv. Create it and install deps." >&2
-  echo "Hint: python3 -m venv .venv && source .venv/bin/activate && pip install -e openai-agents-python -e ds-threevictors -r ds-mcp/requirements.txt -e ds-mcp" >&2
-  exit 1
+PY="python3"
+
+# Skip interactive AWS SSO in containers; rely on mounted ~/.aws or env creds.
+# To enable serialized SSO login, set DS_MCP_AWS_SETUP=1.
+if [ "${DS_MCP_AWS_SETUP:-}" = "1" ]; then
+  # shellcheck disable=SC1090
+  source "$SCRIPT_DIR/common_aws_setup.sh"
 fi
-
-# Ensure ds-mcp sources are importable
-export PYTHONPATH="$MCP_DIR/src"
-
-# Ensure AWS auth (serialized SSO if needed)
-# shellcheck disable=SC1090
-source "$SCRIPT_DIR/common_aws_setup.sh"
 
 case "$SERVER_KIND" in
   provider)
-    exec "$PY" "$MCP_DIR/src/ds_mcp/servers/provider_combined_audit_server.py"
+    exec "$PY" -m ds_mcp.servers.provider_combined_audit_server
     ;;
   anomalies)
-    exec "$PY" "$MCP_DIR/src/ds_mcp/servers/market_anomalies_server.py"
+    exec "$PY" -m ds_mcp.servers.market_anomalies_server
     ;;
   *)
     echo "Error: unknown server kind: $SERVER_KIND (expected: provider|anomalies)" >&2
     exit 2
     ;;
 esac
-
