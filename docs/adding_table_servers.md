@@ -97,15 +97,15 @@ Press Ctrl+C to stop.
   "mcpServers": {
     "ds-mcp-all-tables": {
       "command": "bash",
-      "args": ["/full/path/to/scripts/run_server.sh"]
+      "args": ["/full/path/to/ds-mcp/scripts/run_server.sh"]
     },
     "market-anomalies-v3": {
       "command": "bash",
-      "args": ["/full/path/to/scripts/run_market_anomalies.sh"]
+      "args": ["/full/path/to/ds-mcp/scripts/run_mcp_server.sh", "anomalies"]
     },
     "your-table": {
       "command": "bash",
-      "args": ["/full/path/to/scripts/run_your_table.sh"]
+      "args": ["/full/path/to/ds-mcp/scripts/run_mcp_server.sh", "your-server-kind"]
     }
   }
 }
@@ -323,7 +323,7 @@ After successfully adding your table server:
 
 - **Examples**:
   - `src/ds_mcp/servers/market_anomalies_server.py`
-  - `scripts/run_market_anomalies.sh`
+  - `scripts/run_mcp_server.sh`
 
 - **Documentation**:
   - [MULTI_SERVER_SETUP.md](../MULTI_SERVER_SETUP.md)
