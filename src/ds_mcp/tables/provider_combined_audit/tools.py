@@ -274,10 +274,20 @@ def get_table_schema() -> str:
     return _execute_select(sql, params=params)
 
 
-def top_site_issues(provider: str, lookback_days: int = 7, limit: int = 10) -> str:
-    """Top site-related issues for a provider with reason/source returned separately."""
+def top_site_issues(
+    provider: str,
+    site: str | None = None,
+    lookback_days: int = 7,
+    limit: int = 10,
+) -> str:
+    """Top site-related issues for a provider, optionally filtered by site code."""
     limit = min(max(1, limit), 50)
     date_expr = _date_expr(DATE_COL, "bigint")
+    params = [f"%{provider}%"]
+    site_filter = ""
+    if site and site.strip():
+        site_filter = f"  AND {SITE_COL} ILIKE %s "
+        params.append(f"%{site.strip()}%")
     sql = (
         "SELECT "
         "NULLIF(TRIM(issue_sources::VARCHAR), '') AS issue_source, "
@@ -285,6 +295,7 @@ def top_site_issues(provider: str, lookback_days: int = 7, limit: int = 10) -> s
         "COUNT(*) AS cnt "
         "FROM {{PCA}} "
         f"WHERE {PROVIDER_COL} ILIKE %s "
+        f"{site_filter}"
         f"AND {_sales_date_bound(lookback_days)} "
         f"AND {date_expr} >= CURRENT_DATE - {lookback_days} "
         "AND ("
@@ -295,7 +306,7 @@ def top_site_issues(provider: str, lookback_days: int = 7, limit: int = 10) -> s
         "ORDER BY cnt DESC "
         f"LIMIT {limit}"
     )
-    return _execute_select(sql, [f"%{provider}%"])
+    return _execute_select(sql, params)
 
 
 # Note: No deprecated wrappers; use issue_scope_combined directly for multi-dimension scope.
