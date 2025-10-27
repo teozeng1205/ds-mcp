@@ -1,7 +1,7 @@
 """
 Provider Combined Audit table module.
 
-Provides MCP tools for querying and analyzing the monitoring_prod.provider_combined_audit table.
+Provides MCP tools for querying and analyzing the prod.monitoring.provider_combined_audit table.
 """
 
 from ds_mcp.core.registry import TableRegistry
@@ -12,7 +12,7 @@ __all__ = ["register_table"]
 
 def register_table(registry: TableRegistry) -> None:
     """
-    Register the monitoring_prod.provider_combined_audit table with the registry.
+    Register the prod.monitoring.provider_combined_audit table with the registry.
 
     Args:
         registry: TableRegistry instance

@@ -1,5 +1,5 @@
 """
-MCP tools for monitoring_prod.provider_combined_audit.
+MCP tools for prod.monitoring.provider_combined_audit.
 
 Goal: keep each tool minimal — build a simple SELECT with a few helpful macros,
 execute it, and return rows/columns as JSON. Follows MCP guidance for small,
@@ -21,9 +21,14 @@ log = logging.getLogger(__name__)
 # Configuration
 # ============================================================================
 
-SCHEMA_NAME = "monitoring_prod"
+DATABASE_NAME = "prod"
+SCHEMA_NAME = "monitoring"
 TABLE_BASE = "provider_combined_audit"
-TABLE_NAME = f"{SCHEMA_NAME}.{TABLE_BASE}"
+
+if DATABASE_NAME:
+    TABLE_NAME = f"{DATABASE_NAME}.{SCHEMA_NAME}.{TABLE_BASE}"
+else:
+    TABLE_NAME = f"{SCHEMA_NAME}.{TABLE_BASE}"
 
 
 def _build_event_ts(alias: Optional[str] = None) -> str:
@@ -112,15 +117,19 @@ def _get_columns() -> Dict[str, str]:
     conn = _get_conn()
     with conn.cursor() as cur:
         try:
-            _safe_execute(
-                cur,
-                f"""
-                SELECT column_name, data_type
-                FROM svv_columns
-                WHERE table_schema = '{SCHEMA_NAME}' AND table_name = '{TABLE_BASE}'
-                ORDER BY ordinal_position
-                """,
-            )
+            query = [
+                "SELECT column_name, data_type",
+                "FROM svv_columns",
+                "WHERE table_schema = %s",
+                "  AND table_name = %s",
+            ]
+            params = [SCHEMA_NAME, TABLE_BASE]
+            if DATABASE_NAME:
+                query.append("  AND table_catalog = %s")
+                params.append(DATABASE_NAME)
+            query.append("ORDER BY ordinal_position")
+            sql = "\n".join(query)
+            _safe_execute(cur, sql, params)
             return {row[0]: row[1] for row in cur.fetchall()}
         except Exception:
             return {}
@@ -222,7 +231,7 @@ def query_audit(sql_query: str, params: Optional[List] = None) -> str:
     - Keep queries read-only; DDL/DML are rejected.
 
     Macros:
-    - {{PCA}}: monitoring_prod.provider_combined_audit
+    - {{PCA}}: prod.monitoring.provider_combined_audit
     - {{EVENT_TS[:alias]}}: COALESCE(observationtimestamp, actualscheduletimestamp)
     - {{OBS_HOUR}}: DATE_TRUNC('hour', {{EVENT_TS}})
     - {{OD}}: originairportcode || '-' || destinationairportcode
@@ -249,37 +258,53 @@ def query_audit(sql_query: str, params: Optional[List] = None) -> str:
 
 
 def get_table_schema() -> str:
-    """Get table schema for monitoring_prod.provider_combined_audit."""
-    return _execute_select(
-        """
-        SELECT column_name, data_type, character_maximum_length, is_nullable
-        FROM svv_columns
-        WHERE table_schema = 'monitoring_prod' AND table_name = 'provider_combined_audit'
-        ORDER BY ordinal_position
-        """
-    )
+    """Get table schema for prod.monitoring.provider_combined_audit."""
+    query_parts = [
+        "SELECT column_name, data_type, character_maximum_length, is_nullable",
+        "FROM svv_columns",
+        "WHERE table_schema = %s",
+        "  AND table_name = %s",
+    ]
+    params: List[str] = [SCHEMA_NAME, TABLE_BASE]
+    if DATABASE_NAME:
+        query_parts.append("  AND table_catalog = %s")
+        params.append(DATABASE_NAME)
+    query_parts.append("ORDER BY ordinal_position")
+    sql = "\n".join(query_parts)
+    return _execute_select(sql, params=params)
 
 
 def top_site_issues(provider: str, lookback_days: int = 7, limit: int = 10) -> str:
-    """Top site-related issues for a provider.
+    """Top site-related issues for a provider, separated by reason/source.
 
-    Notes:
-    - Uses sales_date partition and {{ISSUE_TYPE}} for stable labels.
-    - provider is matched via ILIKE pattern (e.g., 'AA' or 'AA%').
+    Returns aggregated counts with distinct labels for `issue_reasons` and
+    `issue_sources` instead of coalescing the two together.
     """
     limit = min(max(1, limit), 50)
     date_expr = _date_expr(DATE_COL, "bigint")
-    sql = (
-        "SELECT {{ISSUE_TYPE}} AS issue_key, COUNT(*) AS cnt "
-        "FROM {{PCA}} "
+    base_filters = (
+        f"FROM {{PCA}} "
         f"WHERE {PROVIDER_COL} ILIKE %s "
         f"AND {_sales_date_bound(lookback_days)} "
         f"AND {date_expr} >= CURRENT_DATE - {lookback_days} "
-        "AND COALESCE(NULLIF(TRIM(issue_reasons::VARCHAR), ''), NULLIF(TRIM(issue_sources::VARCHAR), '')) IS NOT NULL "
-        "GROUP BY 1 ORDER BY 2 DESC "
+    )
+    sql = (
+        "SELECT issue_kind, issue_value, COUNT(*) AS cnt "
+        "FROM ("
+        "    SELECT 'reason' AS issue_kind, NULLIF(TRIM(issue_reasons::VARCHAR), '') AS issue_value "
+        f"    {base_filters}"
+        "      AND NULLIF(TRIM(issue_reasons::VARCHAR), '') IS NOT NULL "
+        "    UNION ALL "
+        "    SELECT 'source' AS issue_kind, NULLIF(TRIM(issue_sources::VARCHAR), '') AS issue_value "
+        f"    {base_filters}"
+        "      AND NULLIF(TRIM(issue_sources::VARCHAR), '') IS NOT NULL "
+        ") AS combined "
+        "GROUP BY 1, 2 "
+        "ORDER BY cnt DESC "
         f"LIMIT {limit}"
     )
-    return _execute_select(sql, [f"%{provider}%"])
+    provider_param = f"%{provider}%"
+    return _execute_select(sql, [provider_param, provider_param])
 
 
 # Note: No deprecated wrappers; use issue_scope_combined directly for multi-dimension scope.

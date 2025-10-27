@@ -26,7 +26,7 @@ def register_all_tables(registry: TableRegistry) -> None:
     )
     register_market_anomalies(registry)
 
-    # Register monitoring_prod.provider_combined_audit table
+    # Register prod.monitoring.provider_combined_audit table
     try:
         from ds_mcp.tables.provider_combined_audit import (
             register_table as register_provider_audit,

@@ -21,6 +21,7 @@ class TableConfig:
         name: Full table name (e.g., 'analytics.market_level_anomalies_v3')
         display_name: Human-readable name for the table
         description: Description of the table and its purpose
+        database_name: Optional database/catalog name (for cross-database tables)
         schema_name: Database schema name
         table_name: Table name without schema
         connector_type: Type of database connector to use
@@ -32,6 +33,7 @@ class TableConfig:
     description: str
     schema_name: str
     table_name: str
+    database_name: str | None = None
     connector_type: str = "analytics"
     tools: List[Callable] = field(default_factory=list)
     metadata: Dict[str, Any] = field(default_factory=dict)
@@ -39,6 +41,8 @@ class TableConfig:
     @property
     def full_name(self) -> str:
         """Return the full table name (schema.table)."""
+        if self.database_name:
+            return f"{self.database_name}.{self.schema_name}.{self.table_name}"
         return f"{self.schema_name}.{self.table_name}"
 
 

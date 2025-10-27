@@ -1,5 +1,5 @@
 """
-Configuration for monitoring_prod.provider_combined_audit table.
+Configuration for prod.monitoring.provider_combined_audit table.
 
 Defines table metadata and tool registration.
 """
@@ -9,7 +9,7 @@ from ds_mcp.core.registry import TableConfig
 
 def get_table_config() -> TableConfig:
     """
-    Get the configuration for the monitoring_prod.provider_combined_audit table.
+    Get the configuration for the prod.monitoring.provider_combined_audit table.
 
     Returns:
         TableConfig instance with table metadata and tools
@@ -17,14 +17,15 @@ def get_table_config() -> TableConfig:
     from ds_mcp.tables.provider_combined_audit import tools
 
     config = TableConfig(
-        name="monitoring_prod.provider_combined_audit",
+        name="prod.monitoring.provider_combined_audit",
         display_name="Provider Combined Audit",
         description=(
             "Audit trail for provider-level monitoring. Contains historical events/changes "
             "to combined provider monitoring data."
         ),
-        schema_name="monitoring_prod",
+        schema_name="monitoring",
         table_name="provider_combined_audit",
+        database_name="prod",
         connector_type="analytics",
         tools=[
             tools.query_audit,
