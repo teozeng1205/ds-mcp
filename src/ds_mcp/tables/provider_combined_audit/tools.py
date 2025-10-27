@@ -275,36 +275,27 @@ def get_table_schema() -> str:
 
 
 def top_site_issues(provider: str, lookback_days: int = 7, limit: int = 10) -> str:
-    """Top site-related issues for a provider, separated by reason/source.
-
-    Returns aggregated counts with distinct labels for `issue_reasons` and
-    `issue_sources` instead of coalescing the two together.
-    """
+    """Top site-related issues for a provider with reason/source returned separately."""
     limit = min(max(1, limit), 50)
     date_expr = _date_expr(DATE_COL, "bigint")
-    base_filters = (
-        f"FROM {{PCA}} "
+    sql = (
+        "SELECT "
+        "NULLIF(TRIM(issue_sources::VARCHAR), '') AS issue_source, "
+        "NULLIF(TRIM(issue_reasons::VARCHAR), '') AS issue_reason, "
+        "COUNT(*) AS cnt "
+        "FROM {{PCA}} "
         f"WHERE {PROVIDER_COL} ILIKE %s "
         f"AND {_sales_date_bound(lookback_days)} "
         f"AND {date_expr} >= CURRENT_DATE - {lookback_days} "
-    )
-    sql = (
-        "SELECT issue_kind, issue_value, COUNT(*) AS cnt "
-        "FROM ("
-        "    SELECT 'reason' AS issue_kind, NULLIF(TRIM(issue_reasons::VARCHAR), '') AS issue_value "
-        f"    {base_filters}"
-        "      AND NULLIF(TRIM(issue_reasons::VARCHAR), '') IS NOT NULL "
-        "    UNION ALL "
-        "    SELECT 'source' AS issue_kind, NULLIF(TRIM(issue_sources::VARCHAR), '') AS issue_value "
-        f"    {base_filters}"
-        "      AND NULLIF(TRIM(issue_sources::VARCHAR), '') IS NOT NULL "
-        ") AS combined "
+        "AND ("
+        "  NULLIF(TRIM(issue_sources::VARCHAR), '') IS NOT NULL "
+        "  OR NULLIF(TRIM(issue_reasons::VARCHAR), '') IS NOT NULL "
+        ") "
         "GROUP BY 1, 2 "
         "ORDER BY cnt DESC "
         f"LIMIT {limit}"
     )
-    provider_param = f"%{provider}%"
-    return _execute_select(sql, [provider_param, provider_param])
+    return _execute_select(sql, [f"%{provider}%"])
 
 
 # Note: No deprecated wrappers; use issue_scope_combined directly for multi-dimension scope.
