@@ -1,21 +1,35 @@
-"""
-Provider Combined Audit table module.
+"""Provider Combined Audit table exports built via the new table builder."""
 
-Provides MCP tools for querying and analyzing the prod.monitoring.provider_combined_audit table.
-"""
+from __future__ import annotations
 
 from ds_mcp.core.registry import TableRegistry
-from ds_mcp.tables.provider_combined_audit.config import get_table_config
+from ds_mcp.tables.base import build_table, export_tools
 
-__all__ = ["register_table"]
+from . import tools
+
+TABLE = build_table(
+    slug="provider",
+    schema_name="monitoring",
+    table_name="provider_combined_audit",
+    database_name="prod",
+    display_name="Provider Combined Audit",
+    description=(
+        "Audit trail for provider-level monitoring combining issue signals and contextual metadata."
+    ),
+    query_tool_name="query_audit",
+    default_limit=200,
+    macros=tools.MACROS,
+    sql_tools=tools.SQL_TOOL_SPECS,
+)
+
+TABLE_NAME = TABLE.definition.full_table_name()
+
+export_tools(TABLE, globals())
 
 
 def register_table(registry: TableRegistry) -> None:
-    """
-    Register the prod.monitoring.provider_combined_audit table with the registry.
+    """Register the table definition with *registry*."""
+    TABLE.register(registry)
 
-    Args:
-        registry: TableRegistry instance
-    """
-    config = get_table_config()
-    registry.register_table(config)
+
+__all__ = ["TABLE_NAME", "TABLE", "register_table", *sorted(TABLE.tools)]

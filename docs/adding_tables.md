@@ -70,7 +70,6 @@ TABLE = build_table(
     description="Short blurb for MCP clients.",
     query_tool_name="query_my_table",  # adds an alias; `query_table` is always present
     default_limit=200,
-    max_limit=500,
     macros=tools.MACROS,
     sql_tools=tools.SQL_TOOL_SPECS,
 )
@@ -86,7 +85,7 @@ def register_table(registry: TableRegistry) -> None:
 __all__ = ["TABLE", "TABLE_NAME", "register_table", *sorted(TABLE.tools)]
 ```
 
-The helper returns a `TableBundle` with metadata, generated tool callables, and
+The helper returns a `TableBundle` with generated tool callables and
 aliases. `query_table` and `get_table_schema` are emitted for every table; any
 custom names (via ``query_tool_name`` or ``query_aliases``) become thin aliases.
 `export_tools()` pushes everything onto the module namespace so users can import
@@ -134,7 +133,6 @@ Everything returns JSON text so it matches the MCP behaviour exactly.
 
 ## 7. Optional niceties
 
-- Use `metadata={`...`}` to attach extra hints (primary keys, owners, etc.).
 - Provide friendly aliases with `query_tool_name` / `query_aliases` (standard
   `query_table` / `get_table_schema` remain available automatically).
 - Reuse macros such as `{{TABLE}}`, `{{SCHEMA}}`, and `{{TODAY}}` added by the

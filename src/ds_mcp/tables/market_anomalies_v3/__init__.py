@@ -15,27 +15,7 @@ TABLE = build_table(
     description="Market-level pricing anomalies with impact scores and competitive position data.",
     query_tool_name="query_anomalies",
     default_limit=100,
-    max_limit=200,
     macros=tools.MACROS,
-    metadata={
-        "version": "3.0",
-        "primary_key": ["customer", "sales_date", "seg_mkt"],
-        "key_metrics": [
-            "impact_score",
-            "any_anomaly",
-            "freq_pcnt_val",
-            "mag_pcnt_val",
-            "revenue_score",
-        ],
-        "dimensions": [
-            "customer",
-            "sales_date",
-            "seg_mkt",
-            "cp",
-            "region_name",
-            "cabin_group",
-        ],
-    },
     sql_tools=tools.SQL_TOOL_SPECS,
 )
 

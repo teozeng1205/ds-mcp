@@ -165,9 +165,7 @@ class SimpleTableDefinition:
     query_aliases: Sequence[str] = field(default_factory=tuple)
     schema_aliases: Sequence[str] = field(default_factory=tuple)
     default_limit: int = 200
-    max_limit: int = 1000
     macros: Mapping[str, MacroValue] = field(default_factory=dict)
-    metadata: Dict[str, Any] = field(default_factory=dict)
     sql_tools: Sequence[SQLToolSpec] = field(default_factory=tuple)
 
     def full_table_name(self) -> str:
@@ -201,14 +199,6 @@ class SimpleTableDefinition:
         for sql_tool in self.sql_tools:
             tools.append(executor.make_sql_tool(sql_tool))
 
-        metadata = {
-            "slug": self.slug,
-            "default_limit": self.default_limit,
-        }
-        if self.macros:
-            metadata["macros"] = sorted(self.macros.keys())
-        metadata.update(self.metadata)
-
         return TableConfig(
             name=self.full_table_name(),
             display_name=self.display_name,
@@ -218,7 +208,11 @@ class SimpleTableDefinition:
             database_name=self.database_name,
             connector_type=self.connector_type,
             tools=tools,
-            metadata=metadata,
+            metadata={
+                "slug": self.slug,
+                "default_limit": self.default_limit,
+                **({"macros": sorted(self.macros.keys())} if self.macros else {}),
+            },
         )
 
     def register(self, registry: TableRegistry) -> None:
@@ -294,9 +288,7 @@ def build_table(
     query_aliases: Sequence[str] = (),
     schema_aliases: Sequence[str] = (),
     default_limit: int = 200,
-    max_limit: int = 1000,
     macros: Mapping[str, MacroValue] | None = None,
-    metadata: Dict[str, Any] | None = None,
     sql_tools: Sequence[SQLToolSpec] = (),
 ) -> TableBundle:
     """
@@ -320,9 +312,7 @@ def build_table(
         query_aliases=tuple(query_aliases),
         schema_aliases=tuple(schema_aliases),
         default_limit=default_limit,
-        max_limit=max_limit,
         macros=dict(macros or {}),
-        metadata=dict(metadata or {}),
         sql_tools=tuple(sql_tools),
     )
 
@@ -456,17 +446,14 @@ class SimpleTableExecutor:
             return expanded, max_rows
 
         limit = max_rows or self.definition.default_limit
-        limit = max(1, min(limit, self.definition.max_limit))
+        limit = max(1, limit)
         match = _LIMIT_PATTERN.search(expanded)
         if match:
             try:
                 existing = int(match.group(1))
             except ValueError:
                 existing = limit
-            adjusted = min(existing, limit)
-            if adjusted != existing:
-                expanded = _LIMIT_PATTERN.sub(f"LIMIT {adjusted}", expanded, count=1)
-            limit = adjusted
+            limit = existing
         else:
             expanded = expanded.rstrip(";") + f" LIMIT {limit}"
 
@@ -557,7 +544,6 @@ class SimpleTableExecutor:
     def make_query_tool(self, name: str) -> Callable[[str, Optional[int]], str]:
         macros_list = ", ".join(sorted(self.macros.keys()))
         default_limit = self.definition.default_limit
-        max_limit = self.definition.max_limit
 
         def query_tool(sql_query: str, max_rows: Optional[int] = None) -> str:
             """
@@ -574,7 +560,7 @@ class SimpleTableExecutor:
         query_tool.__doc__ = (
             query_tool.__doc__.strip()
             + f"\n\nMacros available: {macros_list or '(none)'}."
-            + f" Default limit: {default_limit} rows (cap {max_limit})."
+            + f" Default limit: {default_limit} rows."
         )
         return query_tool
 
@@ -680,4 +666,3 @@ class SimpleTableExecutor:
 
         sql = _PARAM_PATTERN.sub(replacer, sql_template)
         return sql, params
-
