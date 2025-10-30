@@ -272,15 +272,18 @@ chmod +x scripts/run_your_table.sh
 
 ### Different Database Connector
 
-Edit your server file to use a different connector:
+Register an alternative connector at import time and reference it by name from
+your table module:
 
 ```python
-# In your_table_server.py, if you need MySQL instead of Redshift:
-from ds_mcp.core.connectors import DatabaseConnectorFactory
+from ds_mcp.core.connectors import register_connector
+from mylib import MySqlConnector
 
-# Your table's tools should specify:
-connector = DatabaseConnectorFactory.get_connector("mysql")  # or "analytics"
+register_connector("analytics_mysql", lambda: MySqlConnector(...))
 ```
+
+Then set `connector_type="analytics_mysql"` in your table's `build_table(...)`
+call. All generated tools will use the new connector automatically.
 
 ## Next Steps
 

@@ -7,11 +7,12 @@ Requires ds-mcp and threevictors installed and AWS/Redshift access.
 import sys
 import json
 
-from ds_mcp.tables.market_anomalies_v3.tools import (
+from ds_mcp.tables.market_anomalies_v3 import (
+    TABLE_NAME,
     get_available_customers,
     get_table_schema,
     query_anomalies,
-    TABLE_NAME,
+    query_table,
 )
 
 def print_result(tool_name, result):
@@ -43,6 +44,9 @@ def main():
 
     # Simple sample query (LIMIT 1)
     sql = f"SELECT * FROM {TABLE_NAME} LIMIT 1"
+    print_result("query_table(LIMIT 1)", query_table(sql))
+
+    # Alias remains for backwards compatibility
     print_result("query_anomalies(LIMIT 1)", query_anomalies(sql))
 
     print("\n"*2)

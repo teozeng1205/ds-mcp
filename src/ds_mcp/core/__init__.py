@@ -1,11 +1,23 @@
 """
-Core functionality for DS-MCP server.
+Core functionality for DS-MCP.
 
-This module provides the base classes and utilities for database connections,
-table registry, and tool generation.
+This re-export keeps the public surface small and intentionally focused on the
+pieces users customise most often.
 """
 
-from ds_mcp.core.connectors import AnalyticsReader
-from ds_mcp.core.registry import TableRegistry, TableConfig
+from ds_mcp.core.connectors import (
+    AnalyticsReader,
+    ConnectorRegistry,
+    get_connector,
+    register_connector,
+)
+from ds_mcp.core.registry import TableConfig, TableRegistry
 
-__all__ = ["AnalyticsReader", "TableRegistry", "TableConfig"]
+__all__ = [
+    "AnalyticsReader",
+    "ConnectorRegistry",
+    "TableConfig",
+    "TableRegistry",
+    "get_connector",
+    "register_connector",
+]

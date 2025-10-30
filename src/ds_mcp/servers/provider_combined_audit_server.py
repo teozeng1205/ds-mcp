@@ -1,56 +1,13 @@
 #!/usr/bin/env python3
-"""
-Provider Combined Audit MCP Server Entry Point
+"""Provider Combined Audit MCP server entry point."""
 
-This server exposes ONLY the prod.monitoring.provider_combined_audit table.
-Use when you want isolated access to just this table via MCP.
-"""
+from __future__ import annotations
 
-import sys
-import os
-import logging
-
-from mcp.server.fastmcp import FastMCP
-from ds_mcp.core.registry import TableRegistry
-from ds_mcp.tables.provider_combined_audit import register_table
-
-# Configure logging to stderr (critical for MCP servers)
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(levelname)s [%(name)s] %(message)s',
-    stream=sys.stderr
-)
-
-log = logging.getLogger(__name__)
+from ds_mcp.servers.base_server import run_table_server
 
 
-def main():
-    """Run the Provider Combined Audit MCP server."""
-    log.info("Starting Provider Combined Audit MCP Server")
-
-    # Initialize MCP server
-    mcp = FastMCP("Provider Combined Audit")
-
-    # Initialize table registry
-    registry = TableRegistry()
-
-    # Register ONLY the provider_combined_audit table
-    register_table(registry)
-
-    log.info(f"Registered {len(registry)} table")
-
-    for table in registry.get_all_tables():
-        log.info(f"Registering {len(table.tools)} tools from {table.display_name}")
-
-        for tool_func in table.tools:
-            mcp.tool()(tool_func)
-            log.info(f"  - Registered tool: {tool_func.__name__}")
-
-    total_tools = sum(len(table.tools) for table in registry.get_all_tables())
-    log.info(f"Total tools registered: {total_tools}")
-
-    # Run the server
-    mcp.run()
+def main() -> None:
+    run_table_server("provider")
 
 
 if __name__ == "__main__":

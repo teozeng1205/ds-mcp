@@ -38,7 +38,7 @@ _FORBIDDEN_KEYWORDS = {
     "GRANT",
     "REVOKE",
 }
-_PARAM_PATTERN = re.compile(r":([a-zA-Z_][a-zA-Z0-9_]*)")
+_PARAM_PATTERN = re.compile(r"(?<!:):([a-zA-Z_][a-zA-Z0-9_]*)")
 _MISSING = object()
 
 
