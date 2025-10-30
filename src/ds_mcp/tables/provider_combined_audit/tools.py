@@ -71,7 +71,7 @@ def _prepare_top_site_flex(values: Dict[str, str]) -> str:
     if not provider:
         provider = _infer_code(values.get("request", ""), _PROVIDER_PATTERN) or ""
     if not provider:
-        raise ValueError("Provider code required (e.g., 'provider QL2').")
+        raise ValueError(f"Provider code required (e.g., 'provider QL2'). Received args: {values}")
     values["provider"] = provider
     return (
         "SELECT NULLIF(TRIM(sitecode::VARCHAR), '') AS site, COUNT(*) AS issue_count "
@@ -95,7 +95,7 @@ def _prepare_issue_scope_flex(values: Dict[str, Any]) -> str:
     if not site:
         site = _infer_code(request, _SITE_PATTERN) or ""
     if not provider or not site:
-        raise ValueError("Provider and site codes are required (e.g., 'provider QL2' and 'site QF').")
+        raise ValueError(f"Provider and site codes are required (e.g., 'provider QL2' and 'site QF'). Received args: {values}")
     values["provider"] = provider
     values["site"] = site
     dims = values.get("dims") or ["obs_hour"]
