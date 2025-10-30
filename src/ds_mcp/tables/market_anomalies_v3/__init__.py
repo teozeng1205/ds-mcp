@@ -1,33 +1,53 @@
-"""
-Market Level Anomalies V3 table module.
+"""Market Level Anomalies table tools built via the simplified table builder."""
 
-Provides MCP tools for querying and analyzing the analytics.market_level_anomalies_v3 table.
-"""
+from __future__ import annotations
 
 from ds_mcp.core.registry import TableRegistry
-from ds_mcp.tables.market_anomalies_v3.config import get_table_config
-from ds_mcp.tables.market_anomalies_v3.tools import (
-    query_anomalies,
-    get_table_schema,
-    get_available_customers,
-    overview_anomalies_today,
+from ds_mcp.tables.base import build_table, export_tools
+
+from . import tools
+
+TABLE = build_table(
+    slug="anomalies",
+    schema_name="analytics",
+    table_name="market_level_anomalies_v3",
+    display_name="Market Level Anomalies V3",
+    description="Market-level pricing anomalies with impact scores and competitive position data.",
+    query_tool_name="query_anomalies",
+    default_limit=100,
+    max_limit=200,
+    macros=tools.MACROS,
+    metadata={
+        "version": "3.0",
+        "primary_key": ["customer", "sales_date", "seg_mkt"],
+        "key_metrics": [
+            "impact_score",
+            "any_anomaly",
+            "freq_pcnt_val",
+            "mag_pcnt_val",
+            "revenue_score",
+        ],
+        "dimensions": [
+            "customer",
+            "sales_date",
+            "seg_mkt",
+            "cp",
+            "region_name",
+            "cabin_group",
+        ],
+    },
+    sql_tools=tools.SQL_TOOL_SPECS,
 )
 
-__all__ = [
-    "register_table",
-    "query_anomalies",
-    "get_table_schema",
-    "get_available_customers",
-    "overview_anomalies_today",
-]
+TABLE_NAME = TABLE.definition.full_table_name()
+
+# Export generated MCP tools (query/schema/custom SQL helpers) directly at the module level.
+export_tools(TABLE, globals())
 
 
 def register_table(registry: TableRegistry) -> None:
-    """
-    Register the market_level_anomalies_v3 table with the registry.
+    """Register the table definition with *registry*."""
+    TABLE.register(registry)
 
-    Args:
-        registry: TableRegistry instance
-    """
-    config = get_table_config()
-    registry.register_table(config)
+
+__all__ = ["TABLE_NAME", "TABLE", "register_table", *sorted(TABLE.tools)]

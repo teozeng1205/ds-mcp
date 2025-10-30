@@ -1,42 +1,89 @@
 """
-Table-specific modules for DS-MCP.
+Table discovery utilities for DS-MCP.
 
-Each table has its own module with configuration, tools, and queries.
-To add a new table, create a new directory here with config.py, tools.py, and queries.py.
+Table packages expose a ``TABLE`` constant containing a
+:class:`ds_mcp.tables.base.TableBundle`.
 """
+
+from __future__ import annotations
+
+import importlib
+import pkgutil
+from functools import lru_cache
+from typing import Dict, Iterable, List, Tuple
 
 from ds_mcp.core.registry import TableRegistry
 
-__all__ = ["register_all_tables"]
+from .base import SimpleTableDefinition, TableBundle
+
+__all__ = [
+    "get_table_bundle",
+    "get_table_definition",
+    "list_available_tables",
+    "register_all_tables",
+]
 
 
-def register_all_tables(registry: TableRegistry) -> None:
+@lru_cache
+def _discover_tables() -> Dict[str, TableBundle]:
+    """Import available table packages and collect their bundles."""
+    tables: dict[str, TableBundle] = {}
+    for module_info in pkgutil.iter_modules(__path__):
+        if not module_info.ispkg or module_info.name.startswith("_"):
+            continue
+
+        module = importlib.import_module(f"{__name__}.{module_info.name}")
+        bundle = getattr(module, "TABLE", None)
+        if bundle is None:
+            continue
+        if isinstance(bundle, TableBundle):
+            tables[bundle.slug] = bundle
+    return tables
+
+
+def list_available_tables() -> List[Tuple[str, str]]:
+    """Return ``(slug, display_name)`` pairs for discovered tables."""
+    tables = _discover_tables()
+    return sorted((slug, bundle.display_name) for slug, bundle in tables.items())
+
+
+def get_table_bundle(slug: str) -> TableBundle:
+    """Return the table bundle for *slug*."""
+    tables = _discover_tables()
+    try:
+        return tables[slug]
+    except KeyError as exc:  # pragma: no cover - defensive
+        raise KeyError(f"Unknown table slug: {slug}") from exc
+
+
+def get_table_definition(slug: str) -> SimpleTableDefinition:
+    """Return the ``SimpleTableDefinition`` for *slug*."""
+    return get_table_bundle(slug).definition
+
+
+def register_all_tables(registry: TableRegistry, only: Iterable[str] | None = None) -> List[str]:
     """
-    Register all available tables with the registry.
-
-    This function is called by the server to load all table configurations.
-    Add new table registrations here as you create new table modules.
+    Register discovered tables with *registry*.
 
     Args:
-        registry: TableRegistry instance to register tables with
+        registry: Target table registry.
+        only: Optional iterable of table slugs to register. When omitted all
+            discovered tables are registered.
+
+    Returns:
+        List of slugs that were registered.
     """
-    # Register market_level_anomalies_v3 table
-    from ds_mcp.tables.market_anomalies_v3 import (
-        register_table as register_market_anomalies,
-    )
-    register_market_anomalies(registry)
+    tables = _discover_tables()
 
-    # Register prod.monitoring.provider_combined_audit table
-    try:
-        from ds_mcp.tables.provider_combined_audit import (
-            register_table as register_provider_audit,
-        )
+    if only is not None:
+        slugs = [slug for slug in only]
+        missing = [slug for slug in slugs if slug not in tables]
+        if missing:
+            raise KeyError(f"Unknown table slug(s): {', '.join(missing)}")
+    else:
+        slugs = sorted(tables.keys())
 
-        register_provider_audit(registry)
-    except Exception as e:
-        # Don't crash server if optional tables fail to import
-        import logging
+    for slug in slugs:
+        tables[slug].register(registry)
 
-        logging.getLogger(__name__).warning(
-            f"Failed to register provider_combined_audit: {e}"
-        )
+    return slugs
