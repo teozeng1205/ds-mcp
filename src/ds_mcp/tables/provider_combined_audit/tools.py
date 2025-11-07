@@ -27,18 +27,49 @@ MACROS = {
     "OBS_HOUR": "DATE_TRUNC('hour', COALESCE(observationtimestamp, actualscheduletimestamp))",
 }
 
-_DIMENSION_SQL: Dict[str, str] = {
+_TRAVEL_DATE_EXPR = "TO_DATE(CAST(scheduledate AS VARCHAR), 'YYYYMMDD')"
+
+_BASE_DIMENSION_SQL: Dict[str, str] = {
     "obs_hour": "{{EVENT_TS:obs_hour}}",
     "pos": "NULLIF(TRIM(pos::VARCHAR), '') AS pos",
     "od": "(NULLIF(TRIM(originairportcode::VARCHAR), '') || '-' || NULLIF(TRIM(destinationairportcode::VARCHAR), '')) AS od",
+    "origin": "NULLIF(TRIM(originairportcode::VARCHAR), '') AS origin",
+    "destination": "NULLIF(TRIM(destinationairportcode::VARCHAR), '') AS destination",
     "cabin": "NULLIF(TRIM(cabin::VARCHAR), '') AS cabin",
     "triptype": "NULLIF(TRIM(triptype::VARCHAR), '') AS triptype",
     "los": "los::VARCHAR AS los",
+    "issue_label": "{{ISSUE_TYPE}} AS issue_label",
+    "depart_period": f"DATE_TRUNC('month', {_TRAVEL_DATE_EXPR}) AS depart_period",
+    "depart_date": f"{_TRAVEL_DATE_EXPR} AS depart_date",
+    "travel_dow": f"DATE_PART('dow', {_TRAVEL_DATE_EXPR}) AS travel_dow",
 }
+
+_DIMENSION_ALIASES: Dict[str, str] = {
+    "origin_code": "origin",
+    "destination_code": "destination",
+    "o_and_d": "od",
+    "o_d": "od",
+    "origin_destination": "od",
+    "issue_labels": "issue_label",
+    "depart_periods": "depart_period",
+    "departure_period": "depart_period",
+    "depart_month": "depart_period",
+    "depart_months": "depart_period",
+    "travel_day_of_week": "travel_dow",
+    "depart_dow": "travel_dow",
+    "departure_dow": "travel_dow",
+}
+
+_DIMENSION_SQL: Dict[str, str] = dict(_BASE_DIMENSION_SQL)
+for alias, target in _DIMENSION_ALIASES.items():
+    _DIMENSION_SQL[alias] = _BASE_DIMENSION_SQL[target]
+
+_DIMENSION_CHOICES: tuple[str, ...] = tuple(_DIMENSION_SQL.keys())
 
 
 _PROVIDER_PATTERN = re.compile(r"provider\s+([A-Z0-9]{2,6})", re.IGNORECASE)
 _SITE_PATTERN = re.compile(r"site\s+([A-Z0-9]{2,6})", re.IGNORECASE)
+_PROVIDER_SITE_PATTERN = re.compile(r"([A-Z0-9]{2,6})\|([A-Z0-9]{2,6})", re.IGNORECASE)
 
 
 def _infer_code(request: str, pattern: re.Pattern[str]) -> Optional[str]:
@@ -46,6 +77,13 @@ def _infer_code(request: str, pattern: re.Pattern[str]) -> Optional[str]:
     if match:
         return match.group(1).upper()
     return None
+
+
+def _infer_provider_site_pair(request: str) -> tuple[Optional[str], Optional[str]]:
+    match = _PROVIDER_SITE_PATTERN.search(request or "")
+    if match:
+        return match.group(1).upper(), match.group(2).upper()
+    return None, None
 
 
 def _prepare_issue_scope(values: Dict[str, List[str]]) -> str:
@@ -70,6 +108,10 @@ def _prepare_top_site_flex(values: Dict[str, str]) -> str:
     if not provider:
         provider = _infer_code(values.get("request", ""), _PROVIDER_PATTERN) or ""
     if not provider:
+        inferred, _ = _infer_provider_site_pair(values.get("request", ""))
+        if inferred:
+            provider = inferred
+    if not provider:
         raise ValueError(f"Provider code required (e.g., 'provider QL2'). Received args: {values}")
     values["provider"] = provider
     return (
@@ -88,10 +130,11 @@ def _prepare_issue_scope_flex(values: Dict[str, Any]) -> str:
     provider = values.get("provider", "").upper()
     site = values.get("site", "").upper()
     request = values.get("request", "")
+    inferred_provider, inferred_site = _infer_provider_site_pair(request)
     if not provider:
-        provider = _infer_code(request, _PROVIDER_PATTERN) or ""
+        provider = _infer_code(request, _PROVIDER_PATTERN) or (inferred_provider or "")
     if not site:
-        site = _infer_code(request, _SITE_PATTERN) or ""
+        site = _infer_code(request, _SITE_PATTERN) or (inferred_site or "")
     if not provider or not site:
         raise ValueError(f"Provider and site codes are required (e.g., 'provider QL2' and 'site QF'). Received args: {values}")
     values["provider"] = provider
@@ -249,7 +292,7 @@ SQL_TOOL_SPECS = (
                 default=("obs_hour", "pos", "od"),
                 kind="list",
                 include_in_sql=False,
-                choices=tuple(_DIMENSION_SQL.keys()),
+                choices=_DIMENSION_CHOICES,
             ),
             ParameterSpec(
                 name="lookback_days",
@@ -356,7 +399,7 @@ SQL_TOOL_SPECS = (
                 default=("obs_hour", "pos", "od"),
                 kind="list",
                 include_in_sql=False,
-                choices=tuple(_DIMENSION_SQL.keys()),
+                choices=_DIMENSION_CHOICES,
             ),
             ParameterSpec(
                 name="lookback_days",
