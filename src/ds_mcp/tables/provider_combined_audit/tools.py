@@ -65,6 +65,17 @@ for alias, target in _DIMENSION_ALIASES.items():
     _DIMENSION_SQL[alias] = _BASE_DIMENSION_SQL[target]
 
 _DIMENSION_CHOICES: tuple[str, ...] = tuple(_DIMENSION_SQL.keys())
+_FULL_SCOPE_DIMS: tuple[str, ...] = (
+    "obs_hour",
+    "pos",
+    "triptype",
+    "los",
+    "od",
+    "cabin",
+    "depart_period",
+    "travel_dow",
+    "issue_label",
+)
 
 
 _PROVIDER_PATTERN = re.compile(r"provider\s+([A-Z0-9]{2,6})", re.IGNORECASE)
@@ -101,6 +112,12 @@ def _prepare_issue_scope(values: Dict[str, List[str]]) -> str:
         "ORDER BY issue_count DESC "
         "LIMIT :limit"
     )
+
+
+def _prepare_issue_scope_full(values: Dict[str, Any]) -> str:
+    scoped = dict(values)
+    scoped["dims"] = list(_FULL_SCOPE_DIMS)
+    return _prepare_issue_scope(scoped)
 
 
 def _prepare_top_site_flex(values: Dict[str, str]) -> str:
@@ -316,6 +333,49 @@ SQL_TOOL_SPECS = (
         enforce_limit=False,
         max_rows_param="limit",
         prepare=_prepare_issue_scope,
+    ),
+    SQLToolSpec(
+        name="issue_scope_combined_all",
+        doc=(
+            "Aggregate provider/site issues across obs_hour, pos, triptype, LOS, O&D, cabin, "
+            "depart periods, travel DOW, and issue labels."
+        ),
+        sql="",
+        params=(
+            ParameterSpec(
+                name="provider",
+                description="Provider code (case-insensitive)",
+                coerce=str,
+                transform=lambda v: v.strip(),
+            ),
+            ParameterSpec(
+                name="site",
+                description="Site code (case-insensitive)",
+                coerce=str,
+                transform=lambda v: v.strip(),
+            ),
+            ParameterSpec(
+                name="lookback_days",
+                description="Days to look back",
+                default=7,
+                coerce=int,
+                min_value=1,
+                max_value=30,
+                as_literal=True,
+            ),
+            ParameterSpec(
+                name="limit",
+                description="Maximum rows to return",
+                default=100,
+                coerce=int,
+                min_value=1,
+                max_value=500,
+                as_literal=True,
+            ),
+        ),
+        enforce_limit=False,
+        max_rows_param="limit",
+        prepare=_prepare_issue_scope_full,
     ),
     SQLToolSpec(
         name="top_site_issues_flex",
