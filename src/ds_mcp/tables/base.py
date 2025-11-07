@@ -14,7 +14,7 @@ import json
 import logging
 import re
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, Mapping, Optional, Sequence
+from typing import Any, Callable, Dict, Mapping, Optional, Sequence, Literal
 
 from ds_mcp.core.connectors import get_connector
 from ds_mcp.core.registry import TableConfig, TableRegistry
@@ -40,6 +40,63 @@ _FORBIDDEN_KEYWORDS = {
 }
 _PARAM_PATTERN = re.compile(r"(?<!:):([a-zA-Z_][a-zA-Z0-9_]*)")
 _MISSING = object()
+
+
+class TableBlueprint:
+    """
+    Declarative, subclass-friendly representation of a table.
+
+    New tables can subclass :class:`TableBlueprint`, fill in metadata as class
+    attributes, and call :meth:`build` to obtain the :class:`TableBundle`.
+    """
+
+    slug: str = ""
+    schema_name: str = ""
+    table_name: str = ""
+    display_name: str = ""
+    description: str = ""
+    database_name: Optional[str] = None
+    connector_type: str = "analytics"
+    query_tool_name: str = "query_table"
+    schema_tool_name: str = "get_table_schema"
+    query_aliases: Sequence[str] = ()
+    schema_aliases: Sequence[str] = ()
+    default_limit: int = 200
+    macros: Mapping[str, MacroValue] = {}
+    sql_tools: Sequence[SQLToolSpec] = ()
+    partition_guardrail: Optional[PartitionGuardrail] = None
+
+    def __init__(
+        self,
+        *,
+        macros: Optional[Mapping[str, MacroValue]] = None,
+        sql_tools: Optional[Sequence[SQLToolSpec]] = None,
+    ):
+        if macros is not None:
+            self.macros = macros
+        if sql_tools is not None:
+            self.sql_tools = sql_tools
+
+    def build(self) -> "TableBundle":
+        if not self.slug or not self.schema_name or not self.table_name:
+            raise ValueError("TableBlueprint requires slug, schema_name, and table_name")
+        return build_table(
+            slug=self.slug,
+            schema_name=self.schema_name,
+            table_name=self.table_name,
+            display_name=self.display_name or self.table_name,
+            description=self.description or f"MCP table for {self.table_name}",
+            database_name=self.database_name,
+            connector_type=self.connector_type,
+            query_tool_name=self.query_tool_name,
+            schema_tool_name=self.schema_tool_name,
+            query_aliases=self.query_aliases,
+            schema_aliases=self.schema_aliases,
+            default_limit=self.default_limit,
+            macros=dict(self.macros or {}),
+            sql_tools=tuple(self.sql_tools or ()),
+            partition_guardrail=self.partition_guardrail,
+        )
 
 
 @dataclass(slots=True)
@@ -145,6 +202,56 @@ class SQLToolSpec:
 
 
 @dataclass(slots=True)
+class PartitionGuardrail:
+    """
+    Optional guardrail that enforces partition predicates in ad-hoc queries.
+
+    Attributes:
+        column: Name of the partition column that must appear in the SQL string.
+        behavior: ``\"error\"`` to raise, ``\"warn\"`` to emit a warning only.
+        hint: Optional human-readable guidance to surface when validation fails.
+        additional_markers: Extra strings (e.g., macro names) that satisfy the guard.
+        case_sensitive: Whether the column/markers matching is case-sensitive.
+    """
+
+    column: str
+    behavior: Literal["error", "warn"] = "error"
+    hint: Optional[str] = None
+    additional_markers: Sequence[str] = ()
+    case_sensitive: bool = False
+
+    def validate(self, sql: str, *, table: str, logger: logging.Logger) -> None:
+        haystack = sql if self.case_sensitive else sql.lower()
+
+        def normalise(value: str) -> str:
+            return value if self.case_sensitive else value.lower()
+
+        markers = [normalise(self.column)]
+        markers.extend(normalise(marker) for marker in self.additional_markers)
+        is_present = any(marker and marker in haystack for marker in markers)
+        if is_present:
+            return
+
+        message = self.hint or f"Queries against '{table}' must filter on partition column '{self.column}'."
+        if self.behavior == "warn":
+            logger.warning("Partition guardrail: %s", message)
+            return
+        raise ValueError(message)
+
+    def to_metadata(self) -> Dict[str, Any]:
+        data: Dict[str, Any] = {
+            "column": self.column,
+            "behavior": self.behavior,
+        }
+        if self.hint:
+            data["hint"] = self.hint
+        if self.additional_markers:
+            data["additional_markers"] = list(self.additional_markers)
+        data["case_sensitive"] = self.case_sensitive
+        return data
+
+
+@dataclass(slots=True)
 class SimpleTableDefinition:
     """
     Declarative description of a table exposed through the MCP server.
@@ -167,6 +274,7 @@ class SimpleTableDefinition:
     default_limit: int = 200
     macros: Mapping[str, MacroValue] = field(default_factory=dict)
     sql_tools: Sequence[SQLToolSpec] = field(default_factory=tuple)
+    partition_guardrail: Optional[PartitionGuardrail] = None
 
     def full_table_name(self) -> str:
         if self.database_name:
@@ -199,6 +307,15 @@ class SimpleTableDefinition:
         for sql_tool in self.sql_tools:
             tools.append(executor.make_sql_tool(sql_tool))
 
+        metadata: Dict[str, Any] = {
+            "slug": self.slug,
+            "default_limit": self.default_limit,
+        }
+        if self.macros:
+            metadata["macros"] = sorted(self.macros.keys())
+        if self.partition_guardrail:
+            metadata["partition_guardrail"] = self.partition_guardrail.to_metadata()
+
         return TableConfig(
             name=self.full_table_name(),
             display_name=self.display_name,
@@ -208,11 +325,7 @@ class SimpleTableDefinition:
             database_name=self.database_name,
             connector_type=self.connector_type,
             tools=tools,
-            metadata={
-                "slug": self.slug,
-                "default_limit": self.default_limit,
-                **({"macros": sorted(self.macros.keys())} if self.macros else {}),
-            },
+            metadata=metadata,
         )
 
     def register(self, registry: TableRegistry) -> None:
@@ -290,6 +403,7 @@ def build_table(
     default_limit: int = 200,
     macros: Mapping[str, MacroValue] | None = None,
     sql_tools: Sequence[SQLToolSpec] = (),
+    partition_guardrail: Optional[PartitionGuardrail] = None,
 ) -> TableBundle:
     """
     Build a :class:`TableBundle` from declarative pieces.
@@ -314,6 +428,7 @@ def build_table(
         default_limit=default_limit,
         macros=dict(macros or {}),
         sql_tools=tuple(sql_tools),
+        partition_guardrail=partition_guardrail,
     )
 
     config = definition.build_config()
@@ -344,6 +459,7 @@ class SimpleTableExecutor:
     def __init__(self, definition: SimpleTableDefinition):
         self.definition = definition
         self.log = logging.getLogger(f"ds_mcp.tables.{definition.slug}")
+        self.guardrail = definition.partition_guardrail
         self.macros = {
             "TABLE": self.definition.full_table_name(),
             "FULL_TABLE": self.definition.full_table_name(),
@@ -413,6 +529,11 @@ class SimpleTableExecutor:
             return {"error": str(exc)}
 
         try:
+            self._enforce_partition_guardrail(prepared_sql)
+        except ValueError as exc:
+            return {"error": str(exc)}
+
+        try:
             payload = self._run_select(
                 prepared_sql,
                 params=None if params is None else tuple(params),
@@ -422,6 +543,11 @@ class SimpleTableExecutor:
             self.log.error("Query execution failed", exc_info=exc)
             return {"error": str(exc)}
         return payload
+
+    def _enforce_partition_guardrail(self, sql: str) -> None:
+        if not self.guardrail:
+            return
+        self.guardrail.validate(sql, table=self.definition.full_table_name(), logger=self.log)
 
     def _prepare_query(
         self,

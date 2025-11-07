@@ -43,11 +43,15 @@ def main():
     print_result("get_available_customers()", get_available_customers())
 
     # Simple sample query (LIMIT 1)
-    sql = f"SELECT * FROM {TABLE_NAME} LIMIT 1"
-    print_result("query_table(LIMIT 1)", query_table(sql))
+    sql = (
+        f"SELECT * FROM {TABLE_NAME} "
+        "WHERE sales_date >= CAST(TO_CHAR(CURRENT_DATE - 1, 'YYYYMMDD') AS INT) "
+        "LIMIT 1"
+    )
+    print_result("query_table(partitioned LIMIT 1)", query_table(sql))
 
     # Alias remains for backwards compatibility
-    print_result("query_anomalies(LIMIT 1)", query_anomalies(sql))
+    print_result("query_anomalies(partitioned LIMIT 1)", query_anomalies(sql))
 
     print("\n"*2)
     print("="*80)
