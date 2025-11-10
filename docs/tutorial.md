@@ -33,8 +33,8 @@ EOF
 bash ds-mcp/scripts/run_mcp_server.sh provider
 bash ds-mcp/scripts/run_mcp_server.sh anomalies
 
-# Multi-table server (if you add more tables)
-bash ds-mcp/scripts/run_server.sh
+# Multi-table server (pass as many identifiers as you like)
+bash ds-mcp/scripts/run_mcp_server.sh provider analytics.some_other_table
 ```
 
 You should see the server start, register tools, and log to stderr.
@@ -69,4 +69,3 @@ Servers log to stderr. Avoid printing to stdout in stdio mode to prevent protoco
 - Add new tables under `src/ds_mcp/tables/`
 - Register them in a custom server or the multi‑table server
 - Use your MCP client to exercise tools end‑to‑end
-

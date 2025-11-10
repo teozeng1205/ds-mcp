@@ -1,141 +1,69 @@
-# Adding Tables the Easy Way
+# Adding a Table
 
-The refactored DS-MCP keeps table onboarding intentionally small: describe the
-table once, list the tools you want, and export everything with a helper. No
-framework surgery, no manual registry edits.
+Everything lives in `ds_mcp/tables/__init__.py`. Each entry is a call to
+`build_table(...)` plus an optional tuple of `SQLToolSpec` definitions. The base
+helper automatically exposes:
 
-## 1. Create a table package
+- `describe_table()` – shows introduction + key/partition columns
+- `get_table_schema()` – pulls metadata from `svv_columns`
+- `read_table_head(limit)` – lightweight preview (defaults to 50 rows)
+- `query_table(sql, max_rows)` – SELECT/WITH-only execution with automatic LIMITs
 
-```
-src/ds_mcp/tables/my_table/
-├── __init__.py   # builds & exports tools
-└── tools.py      # optional helpers / SQL specs
-```
-
-`__init__.py` can be the only file if the table is tiny. Use `tools.py` when you
-want to keep SQL specs or helper functions separate.
-
-## 2. Describe SQL tools declaratively
-
-`ds_mcp.tables.base` still provides `ParameterSpec` and `SQLToolSpec`. They let
-you describe parameters, macros, and limits without writing boilerplate. For
-example:
+## 1. Define custom SQL helpers (optional)
 
 ```python
-# src/ds_mcp/tables/my_table/tools.py
 from ds_mcp.tables.base import ParameterSpec, SQLToolSpec
 
-MACROS = {
-    "TABLE": "analytics.my_table",
-}
-
-SQL_TOOL_SPECS = (
+MY_SQL_TOOLS = (
     SQLToolSpec(
         name="latest_rows",
-        doc="Return the most recent records (defaults to 50).",
+        doc="Return the most recent records.",
         sql="SELECT * FROM {{TABLE}} ORDER BY snapshot_ts DESC LIMIT :limit",
         params=(
-            ParameterSpec(
-                name="limit",
-                default=50,
-                coerce=int,
-                min_value=1,
-                max_value=500,
-                as_literal=True,
-            ),
+            ParameterSpec(name="limit", default=50, coerce=int, min_value=1, max_value=500, as_literal=True),
         ),
         enforce_limit=False,
-        max_rows_param="limit",
     ),
 )
 ```
 
-You can skip this step entirely if the default `query_*` and `get_table_schema`
-tools are enough.
+Macros like `{{TABLE}}`, `{{SCHEMA}}`, and `{{TODAY}}` are available by default,
+so most queries remain short strings.
 
-## 3. Build the table in `__init__.py`
+## 2. Register the table
+
+Append to the `TABLES` dict:
 
 ```python
-# src/ds_mcp/tables/my_table/__init__.py
-from ds_mcp.core.registry import TableRegistry
-from ds_mcp.tables.base import build_table, export_tools
+from ds_mcp.tables.base import build_table
 
-from . import tools
-
-TABLE = build_table(
-    slug="my_table",
+TABLES["example"] = build_table(
+    slug="example",
     schema_name="analytics",
-    table_name="my_table",
-    display_name="My Table",
-    description="Short blurb for MCP clients.",
-    query_tool_name="query_my_table",  # adds an alias; `query_table` is always present
-    default_limit=200,
-    macros=tools.MACROS,
-    sql_tools=tools.SQL_TOOL_SPECS,
+    table_name="example_table",
+    description="Short blurb for prompts.",
+    key_columns=("customer", "sales_date"),
+    partition_columns=("sales_date",),
+    macros={"TABLE": "analytics.example_table"},
+    custom_tools=MY_SQL_TOOLS,
+    query_aliases=("query_example",),  # optional alias for query_table
 )
-
-export_tools(TABLE, globals())          # adds query_table(), query_my_table(), latest_rows(), …
-TABLE_NAME = TABLE.definition.full_table_name()
-
-
-def register_table(registry: TableRegistry) -> None:
-    TABLE.register(registry)
-
-
-__all__ = ["TABLE", "TABLE_NAME", "register_table", *sorted(TABLE.tools)]
 ```
 
-The helper returns a `TableBundle` with generated tool callables and
-aliases. `query_table` and `get_table_schema` are emitted for every table; any
-custom names (via ``query_tool_name`` or ``query_aliases``) become thin aliases.
-`export_tools()` pushes everything onto the module namespace so users can import
-the tools directly or reach them via MCP.
+That’s it—`register_all_tables` automatically picks up the new entry, and the
+chat client can target it via `--table example` (or the full `schema.table` if
+you’d rather not add a slug).
 
-## 4. Register (nothing to edit!)
+## 3. Generic tables
 
-Discovery is automatic: once your module lives under `ds_mcp.tables.*` and
-exposes a `TABLE` bundle, the registry picks it up. `FastMCP` servers that rely on `register_all_tables()` will see the new
-tools automatically.
+If you don’t want to touch the file, you can call any `schema.table` (or
+`database.schema.table`) directly from `chat.py`/`run_mcp_server.sh`. The helper
+will synthesize a generic `Table` on the fly with the five core tools
+(describe/schema/partitions/head/query).
 
-If you want a single-table server:
+## 4. Safety tips
 
-```python
-from ds_mcp.tables.my_table import register_table
-```
-
-That helper is generated in Step 3.
-
-## 5. Add a database connector (only if you need a new one)
-
-The connector module now exposes a tiny registry. Register a connector once at
-import time and reference it by name in your table definition:
-
-```python
-from ds_mcp.core.connectors import register_connector
-from some_lib import PostgresConnector
-
-register_connector("analytics_readonly", lambda: PostgresConnector(...))
-```
-
-Set `connector_type="analytics_readonly"` in `build_table` and you're done.
-
-## 6. Test ad-hoc
-
-You can import and run any generated tool directly:
-
-```python
-from ds_mcp.tables.my_table import latest_rows
-
-print(latest_rows(limit=10))
-```
-
-Everything returns JSON text so it matches the MCP behaviour exactly.
-
-## 7. Optional niceties
-
-- Provide friendly aliases with `query_tool_name` / `query_aliases` (standard
-  `query_table` / `get_table_schema` remain available automatically).
-- Reuse macros such as `{{TABLE}}`, `{{SCHEMA}}`, and `{{TODAY}}` added by the
-  executor automatically.
-
-That’s it. One module, a couple of declarative lines, and the tools are live.
+- Keep introductions short but specific. Mention key columns + partition column.
+- Custom SQL helpers should stay read-only; the base helper already blocks
+  mutating statements.
+- Prefer declarative macros so you don’t repeat schema names throughout strings.

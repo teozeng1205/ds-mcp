@@ -1,20 +1,23 @@
-"""
-Shared helpers for defining DS-MCP tables.
+"""Simple table helpers for DS-MCP.
 
-This module provides a small abstraction (`SimpleTableDefinition`) that
-wraps the common patterns for exposing a database table as a set of MCP
-tools. It keeps query execution, macro expansion, and safety checks in one
-place so individual table modules can stay concise.
+Every table gets five core tools for free:
+- describe_table() – introduction, key/partition columns, default limits
+- get_table_partitions() – partition metadata via svv_table_info
+- get_table_schema() – column metadata from svv_columns
+- read_table_head(limit) – quick peek at the latest rows
+- query_table(sql, max_rows) – SELECT/WITH only, auto LIMIT and macro expansion
+
+Custom SQL helpers stay declarative using SQLToolSpec/ParameterSpec.
 """
 
 from __future__ import annotations
 
-import functools
+from collections.abc import Sequence as SequenceABC
+from dataclasses import dataclass, field
 import json
 import logging
 import re
-from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, Mapping, Optional, Sequence, Literal
+from typing import Any, Callable, Dict, Mapping, Optional, Sequence
 
 from ds_mcp.core.connectors import get_connector
 from ds_mcp.core.registry import TableConfig, TableRegistry
@@ -23,458 +26,248 @@ log = logging.getLogger(__name__)
 
 MacroValue = str | Callable[[Optional[str]], str]
 
-_MACRO_PATTERN = re.compile(r"\{\{([A-Z0-9_]+)(?::([A-Za-z_][A-Za-z0-9_]*))?\}\}")
-_LIMIT_PATTERN = re.compile(r"\blimit\b\s+(\d+)", flags=re.IGNORECASE)
-_FORBIDDEN_KEYWORDS = {
-    "DELETE",
-    "UPDATE",
-    "INSERT",
-    "DROP",
-    "TRUNCATE",
-    "ALTER",
-    "CREATE",
-    "COPY",
-    "UNLOAD",
-    "GRANT",
-    "REVOKE",
-}
+_FORBIDDEN = {"DELETE", "UPDATE", "INSERT", "DROP", "TRUNCATE", "ALTER", "COPY", "UNLOAD"}
 _PARAM_PATTERN = re.compile(r"(?<!:):([a-zA-Z_][a-zA-Z0-9_]*)")
-_MISSING = object()
-
-
-class TableBlueprint:
-    """
-    Declarative, subclass-friendly representation of a table.
-
-    New tables can subclass :class:`TableBlueprint`, fill in metadata as class
-    attributes, and call :meth:`build` to obtain the :class:`TableBundle`.
-    """
-
-    slug: str = ""
-    schema_name: str = ""
-    table_name: str = ""
-    display_name: str = ""
-    description: str = ""
-    database_name: Optional[str] = None
-    connector_type: str = "analytics"
-    query_tool_name: str = "query_table"
-    schema_tool_name: str = "get_table_schema"
-    query_aliases: Sequence[str] = ()
-    schema_aliases: Sequence[str] = ()
-    default_limit: int = 200
-    macros: Mapping[str, MacroValue] = {}
-    sql_tools: Sequence[SQLToolSpec] = ()
-    partition_guardrail: Optional[PartitionGuardrail] = None
-
-    def __init__(
-        self,
-        *,
-        macros: Optional[Mapping[str, MacroValue]] = None,
-        sql_tools: Optional[Sequence[SQLToolSpec]] = None,
-    ):
-        if macros is not None:
-            self.macros = macros
-        if sql_tools is not None:
-            self.sql_tools = sql_tools
-
-    def build(self) -> "TableBundle":
-        if not self.slug or not self.schema_name or not self.table_name:
-            raise ValueError("TableBlueprint requires slug, schema_name, and table_name")
-        return build_table(
-            slug=self.slug,
-            schema_name=self.schema_name,
-            table_name=self.table_name,
-            display_name=self.display_name or self.table_name,
-            description=self.description or f"MCP table for {self.table_name}",
-            database_name=self.database_name,
-            connector_type=self.connector_type,
-            query_tool_name=self.query_tool_name,
-            schema_tool_name=self.schema_tool_name,
-            query_aliases=self.query_aliases,
-            schema_aliases=self.schema_aliases,
-            default_limit=self.default_limit,
-            macros=dict(self.macros or {}),
-            sql_tools=tuple(self.sql_tools or ()),
-            partition_guardrail=self.partition_guardrail,
-        )
+_MACRO_PATTERN = re.compile(r"\{\{([A-Z0-9_]+)(?::([A-Za-z_][A-Za-z0-9_]*))?\}\}")
 
 
 @dataclass(slots=True)
 class ParameterSpec:
-    """
-    Declarative description of a tool parameter.
-
-    Attributes:
-        name: Parameter name.
-        description: Human-readable description.
-        default: Default value (if any).
-        coerce: Optional callable to coerce incoming values.
-        transform: Optional callable applied after coercion.
-        min_value/max_value: Numeric bounds when applicable.
-        choices: Optional allowed values (for scalar parameters).
-        kind: Either ``"scalar"`` or ``"list"`` (comma-separated strings accepted).
-        include_in_sql: Whether the parameter should be substituted as ``:name``.
-        as_literal: If True the value is embedded directly into the SQL instead of
-            using a database parameter (use for LIMIT / column names, etc.).
-    """
-
     name: str
     description: str = ""
-    default: Any = _MISSING
-    coerce: Optional[Callable[[Any], Any]] = None
-    transform: Optional[Callable[[Any], Any]] = None
-    min_value: Optional[float] = None
-    max_value: Optional[float] = None
-    choices: Optional[Sequence[str]] = None
-    kind: str = "scalar"  # "scalar" | "list"
+    default: Any | None = None
+    coerce: Callable[[Any], Any] | None = None
+    kind: str = "scalar"
+    choices: Sequence[Any] | None = None
+    min_value: float | None = None
+    max_value: float | None = None
     include_in_sql: bool = True
     as_literal: bool = False
 
-    def has_default(self) -> bool:
-        return self.default is not _MISSING
-
-    def apply(self, value: Any) -> Any:
-        if value is _MISSING:
-            raise ValueError(f"Missing required value for parameter '{self.name}'")
-
+    def apply(self, value: Any | None) -> Any:
+        if value is None:
+            value = self.default
+        if value is None:
+            raise ValueError(f"Missing required parameter: {self.name}")
         if self.kind == "list":
             if isinstance(value, str):
-                value = [v for v in (part.strip() for part in value.split(",")) if v]
-            elif isinstance(value, Sequence):
-                value = list(value)
-            else:
-                raise ValueError(f"Parameter '{self.name}' expects a list")
-
+                value = [part.strip() for part in value.split(",") if part.strip()]
+            elif not isinstance(value, SequenceABC):
+                value = [value]
         if self.coerce:
             if self.kind == "list":
                 value = [self.coerce(item) for item in value]
             else:
                 value = self.coerce(value)
-
-        if self.transform:
-            value = self.transform(value)
-
-        if self.kind == "scalar":
-            self._validate_scalar(value)
-        else:
-            for item in value:
-                self._validate_scalar(item)
-
+        self._validate(value)
         return value
 
-    def _validate_scalar(self, value: Any) -> None:
-        if self.min_value is not None and isinstance(value, (int, float)):
-            if value < self.min_value:
-                raise ValueError(f"{self.name} must be >= {self.min_value}")
-        if self.max_value is not None and isinstance(value, (int, float)):
-            if value > self.max_value:
-                raise ValueError(f"{self.name} must be <= {self.max_value}")
-        if self.choices is not None:
-            if str(value) not in set(map(str, self.choices)):
+    def _validate(self, value: Any) -> None:
+        values = value if self.kind == "list" else [value]
+        for item in values:
+            if isinstance(item, (int, float)):
+                if self.min_value is not None and item < self.min_value:
+                    raise ValueError(f"{self.name} must be >= {self.min_value}")
+                if self.max_value is not None and item > self.max_value:
+                    raise ValueError(f"{self.name} must be <= {self.max_value}")
+            if self.choices is not None and str(item) not in {str(choice) for choice in self.choices}:
                 raise ValueError(f"{self.name} must be one of {', '.join(map(str, self.choices))}")
 
 
 @dataclass(slots=True)
 class SQLToolSpec:
-    """
-    Declarative SQL tool definition.
-
-    Attributes:
-        name: Tool function name.
-        sql: SQL template using ``:param`` placeholders and table macros.
-        doc: Docstring for the generated tool.
-        params: Parameter specifications.
-        enforce_limit: Whether to enforce automatic LIMIT injection.
-        max_rows: Hard cap on rows returned (overrides parameter-provided values).
-        max_rows_param: Name of parameter whose value will drive result truncation.
-        prepare: Optional callable that receives parameter values (after coercion)
-                 and returns a customised SQL string (used before macro expansion).
-    """
-
     name: str
     sql: str
     doc: str
-    params: Sequence[ParameterSpec] = ()
+    params: Sequence[ParameterSpec] = field(default_factory=tuple)
     enforce_limit: bool = True
-    max_rows: Optional[int] = None
-    max_rows_param: Optional[str] = None
-    prepare: Optional[Callable[[Dict[str, Any]], str]] = None
+    default_limit: int = 200
+    prepare: Callable[[Dict[str, Any]], str] | None = None
 
 
-@dataclass(slots=True)
-class PartitionGuardrail:
-    """
-    Optional guardrail that enforces partition predicates in ad-hoc queries.
-
-    Attributes:
-        column: Name of the partition column that must appear in the SQL string.
-        behavior: ``\"error\"`` to raise, ``\"warn\"`` to emit a warning only.
-        hint: Optional human-readable guidance to surface when validation fails.
-        additional_markers: Extra strings (e.g., macro names) that satisfy the guard.
-        case_sensitive: Whether the column/markers matching is case-sensitive.
-    """
-
-    column: str
-    behavior: Literal["error", "warn"] = "error"
-    hint: Optional[str] = None
-    additional_markers: Sequence[str] = ()
-    case_sensitive: bool = False
-
-    def validate(self, sql: str, *, table: str, logger: logging.Logger) -> None:
-        haystack = sql if self.case_sensitive else sql.lower()
-
-        def normalise(value: str) -> str:
-            return value if self.case_sensitive else value.lower()
-
-        markers = [normalise(self.column)]
-        markers.extend(normalise(marker) for marker in self.additional_markers)
-        is_present = any(marker and marker in haystack for marker in markers)
-        if is_present:
-            return
-
-        message = self.hint or f"Queries against '{table}' must filter on partition column '{self.column}'."
-        if self.behavior == "warn":
-            logger.warning("Partition guardrail: %s", message)
-            return
-        raise ValueError(message)
-
-    def to_metadata(self) -> Dict[str, Any]:
-        data: Dict[str, Any] = {
-            "column": self.column,
-            "behavior": self.behavior,
-        }
-        if self.hint:
-            data["hint"] = self.hint
-        if self.additional_markers:
-            data["additional_markers"] = list(self.additional_markers)
-        data["case_sensitive"] = self.case_sensitive
-        return data
-
-
-@dataclass(slots=True)
-class SimpleTableDefinition:
-    """
-    Declarative description of a table exposed through the MCP server.
-
-    Parameters capture the metadata needed for the registry plus a couple of
-    user-facing configuration options (tool names, default row limits, etc.).
-    """
-
+@dataclass
+class Table:
     slug: str
     schema_name: str
     table_name: str
-    display_name: str
     description: str
-    database_name: Optional[str] = None
+    database_name: str | None = None
+    key_columns: Sequence[str] = field(default_factory=tuple)
+    partition_columns: Sequence[str] = field(default_factory=tuple)
     connector_type: str = "analytics"
-    query_tool_name: str = "query_table"
-    schema_tool_name: str = "get_table_schema"
-    query_aliases: Sequence[str] = field(default_factory=tuple)
-    schema_aliases: Sequence[str] = field(default_factory=tuple)
     default_limit: int = 200
+    head_limit: int = 50
+    head_order_by: Sequence[str] = field(default_factory=tuple)
     macros: Mapping[str, MacroValue] = field(default_factory=dict)
-    sql_tools: Sequence[SQLToolSpec] = field(default_factory=tuple)
-    partition_guardrail: Optional[PartitionGuardrail] = None
+    custom_tools: Sequence[SQLToolSpec] = field(default_factory=tuple)
+    query_aliases: Sequence[str] = field(default_factory=tuple)
 
-    def full_table_name(self) -> str:
+    def __post_init__(self) -> None:
+        if not self.slug or not self.schema_name or not self.table_name:
+            raise ValueError("slug, schema_name, and table_name are required")
+        builtin_macros = {
+            "TABLE": self.full_name,
+            "FULL_TABLE": self.full_name,
+            "SCHEMA": self.schema_name,
+            "TABLE_ONLY": self.table_name,
+            "TODAY": "CAST(TO_CHAR(CURRENT_DATE, 'YYYYMMDD') AS INT)",
+        }
+        merged = dict(builtin_macros)
+        merged.update(self.macros)
+        self.macros = merged
+
+    @property
+    def full_name(self) -> str:
         if self.database_name:
             return f"{self.database_name}.{self.schema_name}.{self.table_name}"
         return f"{self.schema_name}.{self.table_name}"
 
-    def build_config(self) -> TableConfig:
-        executor = SimpleTableExecutor(self)
-
-        tools: list[Callable[..., str]] = []
-
-        query_tool = executor.make_query_tool("query_table")
-        tools.append(query_tool)
-        for alias in self._normalise_aliases(
-            preferred=self.query_tool_name,
-            aliases=self.query_aliases,
-            default="query_table",
-        ):
-            tools.append(executor.make_alias(query_tool, alias))
-
-        schema_tool = executor.make_schema_tool("get_table_schema")
-        tools.append(schema_tool)
-        for alias in self._normalise_aliases(
-            preferred=self.schema_tool_name,
-            aliases=self.schema_aliases,
-            default="get_table_schema",
-        ):
-            tools.append(executor.make_alias(schema_tool, alias))
-
-        for sql_tool in self.sql_tools:
-            tools.append(executor.make_sql_tool(sql_tool))
-
-        metadata: Dict[str, Any] = {
-            "slug": self.slug,
-            "default_limit": self.default_limit,
+    def register(self, registry: TableRegistry) -> None:
+        tools = {
+            "describe_table": self.make_describe_tool(),
+            "get_table_schema": self.make_schema_tool(),
+            "get_table_partitions": self.make_partitions_tool(),
+            "read_table_head": self.make_head_tool(),
+            "query_table": self.make_query_tool(),
         }
-        if self.macros:
-            metadata["macros"] = sorted(self.macros.keys())
-        if self.partition_guardrail:
-            metadata["partition_guardrail"] = self.partition_guardrail.to_metadata()
-
-        return TableConfig(
-            name=self.full_table_name(),
-            display_name=self.display_name,
-            description=self.description,
-            schema_name=self.schema_name,
-            table_name=self.table_name,
-            database_name=self.database_name,
-            connector_type=self.connector_type,
-            tools=tools,
-            metadata=metadata,
+        for alias in self.query_aliases:
+            tools[alias] = self._make_alias(tools["query_table"], alias)
+        for spec in self.custom_tools:
+            tools[spec.name] = self.make_sql_tool(spec)
+        registry.register_table(
+            TableConfig(
+                name=self.full_name,
+                display_name=self.table_name.replace("_", " ").title(),
+                description=self.description,
+                schema_name=self.schema_name,
+                table_name=self.table_name,
+                database_name=self.database_name,
+                connector_type=self.connector_type,
+                tools=list(tools.values()),
+                metadata=self._metadata(),
+            )
         )
 
-    def register(self, registry: TableRegistry) -> None:
-        """Register this table definition with the given registry."""
-        registry.register_table(self.build_config())
-
-    @staticmethod
-    def _normalise_aliases(
-        *,
-        preferred: str,
-        aliases: Sequence[str],
-        default: str,
-    ) -> Sequence[str]:
-        names: list[str] = []
-        if preferred and preferred != default:
-            names.append(preferred)
-        for alias in aliases:
-            if alias and alias not in names and alias != default:
-                names.append(alias)
-        return tuple(names)
-
-
-@dataclass(slots=True)
-class TableBundle:
-    """
-    Convenience wrapper bundling a table definition, registry config, and tools.
-
-    Table modules can return a ``TableBundle`` to expose helpers like
-    ``register`` or ``get_tool`` without re-implementing boilerplate. This keeps
-    the public API tiny while still enabling direct access to the underlying
-    :class:`SimpleTableDefinition`.
-    """
-
-    definition: SimpleTableDefinition
-    config: TableConfig
-    tools: Dict[str, Callable[..., str]]
-
-    @property
-    def slug(self) -> str:
-        return self.definition.slug
-
-    @property
-    def display_name(self) -> str:
-        return self.definition.display_name
-
-    def register(self, registry: TableRegistry) -> None:
-        self.definition.register(registry)
-
-    def get_tool(self, name: str) -> Callable[..., str]:
-        try:
-            return self.tools[name]
-        except KeyError as exc:
-            raise KeyError(f"Tool '{name}' not found for table '{self.definition.slug}'") from exc
-
-    def iter_tools(self) -> Sequence[Callable[..., str]]:
-        return list(self.tools.values())
-
-    def create_executor(self) -> "SimpleTableExecutor":
-        return SimpleTableExecutor(self.definition)
-
-
-def build_table(
-    *,
-    slug: str,
-    schema_name: str,
-    table_name: str,
-    display_name: str,
-    description: str,
-    database_name: Optional[str] = None,
-    connector_type: str = "analytics",
-    query_tool_name: str = "query_table",
-    schema_tool_name: str = "get_table_schema",
-    query_aliases: Sequence[str] = (),
-    schema_aliases: Sequence[str] = (),
-    default_limit: int = 200,
-    macros: Mapping[str, MacroValue] | None = None,
-    sql_tools: Sequence[SQLToolSpec] = (),
-    partition_guardrail: Optional[PartitionGuardrail] = None,
-) -> TableBundle:
-    """
-    Build a :class:`TableBundle` from declarative pieces.
-
-    Table modules should call this helper and export the returned bundle. The
-    bundle exposes helpers for registration and direct access to tool callables,
-    keeping new table additions down to a handful of lines.
-    """
-
-    definition = SimpleTableDefinition(
-        slug=slug,
-        schema_name=schema_name,
-        table_name=table_name,
-        database_name=database_name,
-        display_name=display_name,
-        description=description,
-        connector_type=connector_type,
-        query_tool_name=query_tool_name,
-        schema_tool_name=schema_tool_name,
-        query_aliases=tuple(query_aliases),
-        schema_aliases=tuple(schema_aliases),
-        default_limit=default_limit,
-        macros=dict(macros or {}),
-        sql_tools=tuple(sql_tools),
-        partition_guardrail=partition_guardrail,
-    )
-
-    config = definition.build_config()
-    tools = {tool.__name__: tool for tool in config.tools}
-    return TableBundle(definition=definition, config=config, tools=tools)
-
-
-def export_tools(bundle: TableBundle, namespace: Dict[str, Any]) -> None:
-    """
-    Export all tool callables from *bundle* into *namespace*.
-
-    Typical usage inside a table package::
-
-        TABLE = build_table(...)
-        export_tools(TABLE, globals())
-
-    This keeps the public module surface identical to the previous
-    ``BaseTableModule``-driven approach while staying explicit.
-    """
-
-    namespace.update(bundle.tools)
-
-class SimpleTableExecutor:
-    """
-    Helper that handles macro expansion, SQL safety checks, and execution.
-    """
-
-    def __init__(self, definition: SimpleTableDefinition):
-        self.definition = definition
-        self.log = logging.getLogger(f"ds_mcp.tables.{definition.slug}")
-        self.guardrail = definition.partition_guardrail
-        self.macros = {
-            "TABLE": self.definition.full_table_name(),
-            "FULL_TABLE": self.definition.full_table_name(),
-            "SCHEMA": self.definition.schema_name,
-            "TABLE_ONLY": self.definition.table_name,
-            "TODAY": "CAST(TO_CHAR(CURRENT_DATE, 'YYYYMMDD') AS INT)",
+    def _metadata(self) -> Dict[str, Any]:
+        return {
+            "introduction": self.description,
+            "key_columns": list(self.key_columns),
+            "partition_columns": list(self.partition_columns),
+            "default_limit": self.default_limit,
+            "head_limit": self.head_limit,
         }
-        self.macros.update(definition.macros)
 
-    # ------------------------------------------------------------------ macros
+    # ------------------------------------------------------------------ tools
+    def make_describe_tool(self) -> Callable[[], str]:
+        payload = self._metadata()
+        payload["table"] = self.full_name
 
-    def expand_macros(self, sql: str) -> str:
-        """Replace ``{{MACRO}}`` placeholders using the configured mapping."""
+        def describe() -> str:
+            return json.dumps(payload, indent=2)
 
-        def replacer(match: re.Match[str]) -> str:
+        describe.__name__ = "describe_table"
+        describe.__doc__ = f"Describe {self.full_name} with key columns and partitions."
+        return describe
+
+    def make_schema_tool(self) -> Callable[[], str]:
+        schema = self.schema_name
+        table = self.table_name
+        database = self.database_name
+
+        def schema_tool() -> str:
+            query = [
+                "SELECT column_name, data_type, character_maximum_length, is_nullable",
+                "FROM svv_columns",
+                "WHERE table_schema = %s",
+                "  AND table_name = %s",
+            ]
+            params: list[Any] = [schema, table]
+            if database:
+                query.append("  AND table_catalog = %s")
+                params.append(database)
+            query.append("ORDER BY ordinal_position")
+            result = self._run_query("\n".join(query), params)
+            return json.dumps(result, indent=2)
+
+        schema_tool.__name__ = "get_table_schema"
+        schema_tool.__doc__ = f"Return Redshift schema for {self.full_name}."
+        return schema_tool
+
+    def make_partitions_tool(self) -> Callable[[], str]:
+        schema = self.schema_name
+        table = self.table_name
+        database = self.database_name
+
+        def get_partitions() -> str:
+            query = [
+                "SELECT DISTINCT partitionkey AS column_name",
+                "FROM svv_table_info",
+                "WHERE schemaname = %s",
+                "  AND tablename = %s",
+            ]
+            params: list[Any] = [schema, table]
+            if database:
+                query.append("  AND table_catalog = %s")
+                params.append(database)
+            query.append("ORDER BY column_name")
+            result = self._run_query("\n".join(query), params)
+            return json.dumps(result, indent=2)
+
+        get_partitions.__name__ = "get_table_partitions"
+        get_partitions.__doc__ = f"Return partition columns (if available) for {self.full_name}."
+        return get_partitions
+
+    def make_head_tool(self) -> Callable[[int], str]:
+        order_clause = ""
+        if self.head_order_by:
+            order_clause = " ORDER BY " + ", ".join(self.head_order_by)
+
+        def head(limit: int = self.head_limit) -> str:
+            limit_int = max(1, int(limit))
+            sql = f"SELECT * FROM {self.full_name}{order_clause} LIMIT {limit_int}"
+            return json.dumps(self._run_query(sql), indent=2)
+
+        head.__name__ = "read_table_head"
+        head.__doc__ = f"Return the first few rows from {self.full_name}."
+        return head
+
+    def make_query_tool(self) -> Callable[[str, Optional[int]], str]:
+        default_limit = self.default_limit
+
+        def query(sql: str, max_rows: Optional[int] = None) -> str:
+            limit = default_limit if max_rows is None else max(1, int(max_rows))
+            sql_text = self._ensure_safe_select(sql, limit)
+            if max_rows is not None:
+                sql_text = re.sub(r"(?i)limit\s+\d+", f"LIMIT {limit}", sql_text)
+            return json.dumps(self._run_query(sql_text), indent=2)
+
+        query.__name__ = "query_table"
+        query.__doc__ = f"Execute a read-only query against {self.full_name}. Default LIMIT {default_limit}."
+        return query
+
+    def make_sql_tool(self, spec: SQLToolSpec) -> Callable[..., str]:
+        params = list(spec.params)
+
+        def tool(**kwargs):
+            values: Dict[str, Any] = {}
+            for param in params:
+                values[param.name] = param.apply(kwargs.get(param.name))
+            sql_template = spec.sql
+            if spec.prepare:
+                sql_template = spec.prepare(values)
+            sql_rendered, sql_params = self._render_sql(sql_template, values, spec.params)
+            sql_rendered = self._expand_macros(sql_rendered)
+            if spec.enforce_limit and "limit" not in sql_rendered.lower():
+                sql_rendered = f"{sql_rendered.rstrip(';')} LIMIT {spec.default_limit}"
+            return json.dumps(self._run_query(sql_rendered, sql_params), indent=2)
+
+        tool.__name__ = spec.name
+        tool.__doc__ = spec.doc
+        return tool
+
+    # ----------------------------------------------------------------- helpers
+    def _expand_macros(self, sql: str) -> str:
+        def repl(match: re.Match[str]) -> str:
             name = match.group(1)
             alias = match.group(2)
             value = self.macros.get(name)
@@ -485,310 +278,88 @@ class SimpleTableExecutor:
             if alias:
                 try:
                     return value.format(alias=alias)
-                except (KeyError, IndexError, ValueError):
-                    # Fall back to the raw string if formatting fails
+                except Exception:
                     pass
             return value
 
-        return _MACRO_PATTERN.sub(replacer, sql)
+        return _MACRO_PATTERN.sub(repl, sql)
 
-    # ---------------------------------------------------------------- execution
-
-    def run_query(
-        self,
-        sql: str,
-        *,
-        params: Optional[Sequence[Any]] = None,
-        max_rows: Optional[int] = None,
-        enforce_limit: bool = True,
-    ) -> str:
-        """Execute the given SQL and return a JSON payload."""
-        sql_with_macros = self.expand_macros(sql)
-        result = self.fetch(
-            sql_with_macros,
-            params=params,
-            max_rows=max_rows,
-            enforce_limit=enforce_limit,
-        )
-        return json.dumps(result, indent=2)
-
-    def fetch(
-        self,
-        sql: str,
-        *,
-        params: Optional[Sequence[Any]] = None,
-        max_rows: Optional[int] = None,
-        enforce_limit: bool = True,
-    ) -> Dict[str, Any]:
-        """
-        Execute the query and return a Python dict with columns/rows metadata.
-        """
-        try:
-            prepared_sql, limit = self._prepare_query(sql, max_rows, enforce_limit)
-        except ValueError as exc:
-            return {"error": str(exc)}
-
-        try:
-            self._enforce_partition_guardrail(prepared_sql)
-        except ValueError as exc:
-            return {"error": str(exc)}
-
-        try:
-            payload = self._run_select(
-                prepared_sql,
-                params=None if params is None else tuple(params),
-                limit=limit,
-            )
-        except Exception as exc:  # pragma: no cover - defensive
-            self.log.error("Query execution failed", exc_info=exc)
-            return {"error": str(exc)}
-        return payload
-
-    def _enforce_partition_guardrail(self, sql: str) -> None:
-        if not self.guardrail:
-            return
-        self.guardrail.validate(sql, table=self.definition.full_table_name(), logger=self.log)
-
-    def _prepare_query(
-        self,
-        sql: str,
-        max_rows: Optional[int],
-        enforce_limit: bool,
-    ) -> tuple[str, Optional[int]]:
+    def _ensure_safe_select(self, sql: str, limit: int) -> str:
         stripped = sql.strip()
         if not stripped:
-            raise ValueError("SQL query cannot be empty")
-
-        expanded = self.expand_macros(stripped)
-        upper = expanded.lstrip().upper()
+            raise ValueError("SQL cannot be empty")
+        upper = stripped.upper()
         if not (upper.startswith("SELECT") or upper.startswith("WITH")):
-            raise ValueError("Only SELECT or WITH queries are allowed")
-
-        for keyword in _FORBIDDEN_KEYWORDS:
+            raise ValueError("Only SELECT or WITH statements are allowed")
+        for keyword in _FORBIDDEN:
             if keyword in upper:
                 raise ValueError(f"Forbidden keyword detected: {keyword}")
+        if "{{" in stripped:
+            stripped = self._expand_macros(stripped)
+        if "limit" not in stripped.lower():
+            stripped = f"{stripped.rstrip(';')} LIMIT {limit}"
+        return stripped
 
-        if not enforce_limit:
-            return expanded, max_rows
-
-        limit = max_rows or self.definition.default_limit
-        limit = max(1, limit)
-        match = _LIMIT_PATTERN.search(expanded)
-        if match:
-            try:
-                existing = int(match.group(1))
-            except ValueError:
-                existing = limit
-            limit = existing
-        else:
-            expanded = expanded.rstrip(";") + f" LIMIT {limit}"
-
-        return expanded, limit
-
-    def _run_select(
-        self,
-        sql: str,
-        *,
-        params: Optional[Sequence[Any]],
-        limit: Optional[int],
-    ) -> Dict[str, Any]:
-        connector = get_connector(self.definition.connector_type)
+    def _run_query(self, sql: str, params: Sequence[Any] | None = None) -> Dict[str, Any]:
+        connector = get_connector(self.connector_type)
         conn = connector.get_connection()
-
-        try:
-            if getattr(conn, "autocommit", None) is False:
-                conn.autocommit = True
-        except Exception:
-            pass
-
-        attempts = 0
-        while attempts < 2:
-            try:
-                with conn.cursor() as cursor:
-                    try:
-                        cursor.execute("ROLLBACK;")
-                    except Exception:
-                        pass
-
-                    self.log.info("SQL[%s]: %s | params=%s", self.definition.slug, sql.strip(), params)
-                    cursor.execute(sql, params)
-
-                    columns = [desc[0] for desc in cursor.description]
-                    rows = cursor.fetchmany(limit) if limit else cursor.fetchall()
-                    data = [self._coerce_row(columns, row) for row in rows]
-
-                    truncated = bool(limit) and len(rows) == limit
-                    return {
-                        "columns": columns,
-                        "rows": data,
-                        "row_count": len(data),
-                        "truncated": truncated,
-                        "sql": sql,
-                    }
-            except Exception as exc:  # pragma: no cover - defensive
-                msg = str(exc)
-                if attempts == 0 and ("25P02" in msg or "aborted" in msg):
-                    attempts += 1
-                    try:
-                        conn.rollback()
-                    except Exception:
-                        pass
-                    continue
-                raise
-        raise RuntimeError("Failed to execute query after retry")  # pragma: no cover
+        with conn.cursor() as cursor:
+            log.info("SQL[%s]: %s | params=%s", self.slug, sql, params)
+            cursor.execute(sql, params)
+            columns = [desc[0] for desc in cursor.description]
+            rows = cursor.fetchall()
+        data = [self._row_to_dict(columns, row) for row in rows]
+        return {
+            "columns": columns,
+            "rows": data,
+            "row_count": len(data),
+            "sql": sql,
+            "truncated": False,
+        }
 
     @staticmethod
-    def _coerce_row(columns: Sequence[str], values: Sequence[Any]) -> Dict[str, Any]:
-        row: Dict[str, Any] = {}
-        for idx, column in enumerate(columns):
-            value = values[idx]
-            if isinstance(value, bytes):
-                try:
-                    value = value.decode("utf-8", "ignore")
-                except Exception:  # pragma: no cover - extremely rare
-                    value = value.hex()
-            elif hasattr(value, "isoformat"):
-                value = value.isoformat()
-            elif value is not None and not isinstance(value, (str, int, float, bool)):
-                value = str(value)
-            row[column] = value
-        return row
+    def _row_to_dict(columns: Sequence[str], row: Sequence[Any]) -> Dict[str, Any]:
+        return {col: value for col, value in zip(columns, row)}
 
-    # ------------------------------------------------------------------ tools
-
-    def make_alias(self, tool: Callable[..., str], name: str) -> Callable[..., str]:
-        """Return a thin alias around *tool* with a different exported name."""
-
-        @functools.wraps(tool)
-        def alias(*args, **kwargs):
-            return tool(*args, **kwargs)
-
-        alias.__name__ = name
-        alias.__doc__ = tool.__doc__
-        return alias
-
-    def make_query_tool(self, name: str) -> Callable[[str, Optional[int]], str]:
-        macros_list = ", ".join(sorted(self.macros.keys()))
-        default_limit = self.definition.default_limit
-
-        def query_tool(sql_query: str, max_rows: Optional[int] = None) -> str:
-            """
-            Execute a read-only query against the configured table.
-
-            The query must start with ``SELECT`` or ``WITH``. Mutating statements
-            (``DELETE``, ``UPDATE``, etc.) are rejected automatically. A ``LIMIT``
-            clause is applied when missing to keep responses bounded.
-            """
-
-            return self.run_query(sql_query, max_rows=max_rows)
-
-        query_tool.__name__ = name
-        query_tool.__doc__ = (
-            query_tool.__doc__.strip()
-            + f"\n\nMacros available: {macros_list or '(none)'}."
-            + f" Default limit: {default_limit} rows."
-        )
-        return query_tool
-
-    def make_schema_tool(self, name: str) -> Callable[[], str]:
-        schema = self.definition.schema_name
-        table = self.definition.table_name
-        database = self.definition.database_name
-
-        query = [
-            "SELECT",
-            "  column_name,",
-            "  data_type,",
-            "  character_maximum_length,",
-            "  is_nullable",
-            "FROM svv_columns",
-            "WHERE table_schema = %s",
-            "  AND table_name = %s",
-        ]
-        params: list[Any] = [schema, table]
-        if database:
-            query.append("  AND table_catalog = %s")
-            params.append(database)
-        query.append("ORDER BY ordinal_position")
-        schema_sql = "\n".join(query)
-
-        def get_schema() -> str:
-            """Return column metadata from ``svv_columns``."""
-
-            result = self.fetch(schema_sql, params=params, enforce_limit=False)
-            return json.dumps(result, indent=2)
-
-        get_schema.__name__ = name
-        return get_schema
-
-    def make_sql_tool(self, spec: SQLToolSpec) -> Callable[..., str]:
-        """Create a tool function from a SQLToolSpec."""
-        param_specs = list(spec.params)
-        spec_map = {p.name: p for p in param_specs if p.include_in_sql}
-
-        def tool(*args, **kwargs):
-            if len(args) > len(param_specs):
-                raise TypeError(f"{spec.name}() takes at most {len(param_specs)} positional arguments ({len(args)} given)")
-
-            values: Dict[str, Any] = {}
-
-            for positional, param in zip(args, param_specs):
-                values[param.name] = param.apply(positional)
-
-            for param in param_specs[len(args):]:
-                if param.name in kwargs:
-                    values[param.name] = param.apply(kwargs.pop(param.name))
-                elif param.has_default():
-                    default = param.default
-                    if param.kind == "list" and isinstance(default, (tuple, list)):
-                        default = list(default)
-                    values[param.name] = param.apply(default)
-                else:
-                    raise TypeError(f"Missing required argument: {param.name}")
-
-            if kwargs:
-                raise TypeError(f"Unexpected argument(s): {', '.join(kwargs.keys())}")
-
-            sql_template = spec.sql
-            if spec.prepare:
-                sql_template = spec.prepare(values)
-
-            rendered_sql = self.expand_macros(sql_template)
-            rendered_sql, sql_params = self._render_sql_with_params(rendered_sql, values, spec_map)
-
-            max_rows = spec.max_rows
-            if spec.max_rows_param and spec.max_rows_param in values:
-                max_rows = int(values[spec.max_rows_param])
-            result = self.fetch(
-                rendered_sql,
-                params=sql_params,
-                max_rows=max_rows,
-                enforce_limit=spec.enforce_limit,
-            )
-            return json.dumps(result, indent=2)
-
-        tool.__name__ = spec.name
-        tool.__doc__ = spec.doc.strip()
-        return tool
-
-    def _render_sql_with_params(
+    def _render_sql(
         self,
-        sql_template: str,
-        values: Dict[str, Any],
-        spec_map: Dict[str, ParameterSpec],
+        sql: str,
+        values: Mapping[str, Any],
+        params: Sequence[ParameterSpec],
     ) -> tuple[str, Sequence[Any]]:
-        params: list[Any] = []
+        collected: list[Any] = []
+        param_map = {spec.name: spec for spec in params if spec.include_in_sql}
 
         def replacer(match: re.Match[str]) -> str:
             name = match.group(1)
-            if name not in spec_map:
-                raise ValueError(f"Unknown SQL parameter :{name}")
-            spec = spec_map[name]
+            spec = param_map.get(name)
+            if spec is None:
+                return match.group(0)
             value = values[name]
             if spec.as_literal:
                 return str(value)
-            params.append(value)
+            collected.append(value)
             return "%s"
 
-        sql = _PARAM_PATTERN.sub(replacer, sql_template)
-        return sql, params
+        rendered = _PARAM_PATTERN.sub(replacer, sql)
+        return rendered, collected
+
+    @staticmethod
+    def _make_alias(func: Callable[..., Any], name: str) -> Callable[..., Any]:
+        def alias(*args, **kwargs):
+            return func(*args, **kwargs)
+
+        alias.__name__ = name
+        alias.__doc__ = func.__doc__
+        return alias
+
+def build_table(**kwargs: Any) -> Table:
+    return Table(**kwargs)
+
+
+def export_tools(table: Table, namespace: Dict[str, Any]) -> None:
+    registry = TableRegistry()
+    table.register(registry)
+    config = registry.get_all_tables()[0]
+    for tool in config.tools:
+        namespace[tool.__name__] = tool

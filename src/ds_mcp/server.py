@@ -13,17 +13,55 @@ Usage::
 from __future__ import annotations
 
 import argparse
+import logging
 import sys
-from typing import List
+from typing import List, Sequence
 
-from ds_mcp.servers.base_server import run_server
-from ds_mcp.tables import get_table_definition, list_available_tables
+from mcp.server.fastmcp import FastMCP
+
+from ds_mcp.core.registry import TableRegistry
+from ds_mcp.tables import get_table, list_available_tables, register_all_tables
+
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(levelname)s [%(name)s] %(message)s",
+    stream=sys.stderr,
+)
+
+log = logging.getLogger(__name__)
+
+
+def create_mcp_server(
+    server_name: str = "DS-MCP Server",
+    table_slugs: Sequence[str] | None = None,
+) -> FastMCP:
+    log.info("Creating MCP server: %s", server_name)
+    mcp = FastMCP(server_name)
+    registry = TableRegistry()
+    registered = register_all_tables(registry, only=table_slugs)
+    log.info("Registered tables: %s", ", ".join(registered))
+
+    total_tools = 0
+    for table in registry.get_all_tables():
+        log.info("Registering %s tools from %s", len(table.tools), table.display_name)
+        for tool in table.tools:
+            mcp.tool()(tool)
+            total_tools += 1
+    log.info("Total tools registered: %s", total_tools)
+    return mcp
+
+
+def run_server(server_name: str = "DS-MCP Server", table_slugs: Sequence[str] | None = None) -> None:
+    log.info("Starting %s", server_name)
+    mcp = create_mcp_server(server_name, table_slugs=table_slugs)
+    mcp.run()
 
 
 def _print_available_tables() -> None:
     for slug, display_name in list_available_tables():
-        definition = get_table_definition(slug)
-        print(f"{slug:>12}  {definition.full_table_name()}  ({display_name})")
+        table = get_table(slug)
+        print(f"{slug:>12}  {table.full_name}  ({display_name})")
 
 
 def main(argv: List[str] | None = None) -> int:
@@ -55,7 +93,8 @@ def main(argv: List[str] | None = None) -> int:
     if tables:
         server_name = args.name or "DS-MCP Server"
         if len(tables) == 1 and not args.name:
-            server_name = get_table_definition(tables[0]).display_name
+            table = get_table(tables[0])
+            server_name = table.table_name.replace("_", " ").title()
         run_server(server_name, table_slugs=tables)
     else:
         server_name = args.name or "DS-MCP Multi-Table Server"

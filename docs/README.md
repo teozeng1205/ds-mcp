@@ -225,9 +225,9 @@ bash scripts/run_mcp_server.sh provider
 # Market Anomalies V3 (stdio)
 bash scripts/run_mcp_server.sh anomalies
 
-# Or via Python modules
-python -m ds_mcp.servers.provider_combined_audit_server
-python -m ds_mcp.servers.market_anomalies_server
+# Python module entrypoint (single or multiple tables)
+python -m ds_mcp.server --table provider
+python -m ds_mcp.server --table anomalies
 ```
 
 ### Connecting from an MCP client

@@ -32,7 +32,13 @@ if [ -z "$SERVER_KIND" ]; then
 fi
 
 if [ "$SERVER_KIND" = "--list" ] || [ "$SERVER_KIND" = "-l" ]; then
+  shift
   exec "$PY" -m ds_mcp.server --list
 fi
 
-exec "$PY" -m ds_mcp.server --table "$SERVER_KIND"
+TABLE_ARGS=()
+for slug in "$@"; do
+  TABLE_ARGS+=("--table" "$slug")
+done
+
+exec "$PY" -m ds_mcp.server "${TABLE_ARGS[@]}"
