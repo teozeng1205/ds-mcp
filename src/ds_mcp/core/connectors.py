@@ -1,18 +1,16 @@
 """
-Database connectors for DS-MCP.
+Database connectors for DS-MCP using threevictors.dao.
 
-Provides AnalyticsReader class for querying Redshift analytics database.
+Provides AnalyticsReader that wraps RedshiftConnector for querying analytics database.
 """
 
 from __future__ import annotations
 
 import logging
-from typing import Any
-
 import pandas as pd
 from threevictors.dao import redshift_connector
 
-log = logging.getLogger("AnalyticsReader")
+log = logging.getLogger(__name__)
 log.setLevel(logging.INFO)
 stream_handler = logging.StreamHandler()
 formatter = logging.Formatter('%(levelname)s [%(name)s] %(message)s')
@@ -23,189 +21,135 @@ log.propagate = False
 
 class AnalyticsReader(redshift_connector.RedshiftConnector):
     """
-    Reader for analytics Redshift database using threevictors connector.
+    Analytics database reader using Redshift connector.
 
-    Extends RedshiftConnector from threevictors.dao to provide domain-specific
-    query methods for analytics tables (market anomalies, revenue scores, etc.).
+    Provides connection management and query execution for analytics.* tables.
     """
 
-    def __init__(self) -> None:
-        """Initialize AnalyticsReader and connect to Redshift."""
+    def __init__(self):
         log.info("Initializing AnalyticsReader")
         super().__init__()
-        log.info("AnalyticsReader initialized")
+        log.info("AnalyticsReader initialized successfully")
 
-    def get_properties_filename(self) -> str:
-        """Get the properties file for database configuration."""
+    def get_properties_filename(self):
+        """Properties file for Redshift connection configuration."""
         return "database-analytics-redshift-serverless-reader.properties"
 
-    def execute_query(self, query: str) -> pd.DataFrame:
+    def describe_table(self, table_name: str) -> dict:
         """
-        Execute a SQL query and return results as DataFrame.
+        Get metadata and key information about a table.
 
         Args:
-            query: SQL query string to execute
+            table_name: Full table name (e.g., 'monitoring.provider_combined_audit')
 
         Returns:
-            pandas DataFrame with query results
+            dict with table metadata
         """
-        log.info(f"Executing query: {query[:100]}...")
+        query = f"""
+        SELECT
+            table_schema,
+            table_name,
+            table_type
+        FROM information_schema.tables
+        WHERE table_schema || '.' || table_name = '{table_name}'
+        LIMIT 1;
+        """
+
+        with self.get_connection().cursor() as cursor:
+            cursor.execute(query)
+            colnames = [desc[0] for desc in cursor.description]
+            records = cursor.fetchall()
+
+            if not records:
+                return {"error": f"Table {table_name} not found"}
+
+            df = pd.DataFrame(records, columns=colnames)
+            return df.to_dict(orient='records')[0]
+
+    def get_table_schema(self, table_name: str) -> pd.DataFrame:
+        """
+        Get full column information for a table.
+
+        Args:
+            table_name: Full table name (e.g., 'monitoring.provider_combined_audit')
+
+        Returns:
+            DataFrame with column information
+        """
+        schema, table = table_name.split('.')
+
+        query = f"""
+        SELECT
+            column_name,
+            data_type,
+            is_nullable,
+            column_default
+        FROM information_schema.columns
+        WHERE table_schema = '{schema}'
+          AND table_name = '{table}'
+        ORDER BY ordinal_position;
+        """
+
         with self.get_connection().cursor() as cursor:
             cursor.execute(query)
             colnames = [desc[0] for desc in cursor.description]
             records = cursor.fetchall()
             df = pd.DataFrame(records, columns=colnames)
+            return df
+
+    def read_table_head(self, table_name: str, limit: int = 50) -> pd.DataFrame:
+        """
+        Get data preview (first N rows) from a table.
+
+        Args:
+            table_name: Full table name (e.g., 'monitoring.provider_combined_audit')
+            limit: Number of rows to return (default: 50)
+
+        Returns:
+            DataFrame with first N rows
+        """
+        query = f"""
+        SELECT *
+        FROM {table_name}
+        LIMIT {limit};
+        """
+
+        with self.get_connection().cursor() as cursor:
+            cursor.execute(query)
+            colnames = [desc[0] for desc in cursor.description]
+            records = cursor.fetchall()
+            df = pd.DataFrame(records, columns=colnames)
+            return df
+
+    def query_table(self, query: str, limit: int = 1000) -> pd.DataFrame:
+        """
+        Execute a SELECT query on the database.
+
+        Args:
+            query: SQL SELECT statement
+            limit: Maximum rows to return (default: 1000, safety limit)
+
+        Returns:
+            DataFrame with query results
+        """
+        # Ensure it's a SELECT query for safety
+        if not query.strip().upper().startswith('SELECT'):
+            raise ValueError("Only SELECT queries are allowed")
+
+        # Add LIMIT if not present
+        if 'LIMIT' not in query.upper():
+            query = query.rstrip(';') + f' LIMIT {limit};'
+
+        log.info(f"Executing query: {query[:100]}...")
+
+        with self.get_connection().cursor() as cursor:
+            cursor.execute(query)
+            colnames = [desc[0] for desc in cursor.description]
+            records = cursor.fetchall()
+            df = pd.DataFrame(records, columns=colnames)
+
             log.info(f"Query returned {len(df)} rows")
             return df
 
-    def get_provider_combined_audit(
-        self,
-        sales_date: int,
-        limit: int = 10
-    ) -> pd.DataFrame:
-        """
-        Query provider_combined_audit table.
 
-        Args:
-            sales_date: Date in YYYYMMDD format (partition key)
-            limit: Maximum rows to return
-
-        Returns:
-            pandas DataFrame with audit data
-        """
-        query = f"""
-        SELECT *
-        FROM monitoring.provider_combined_audit
-        WHERE sales_date = {sales_date}
-        LIMIT {limit}
-        """
-        return self.execute_query(query)
-
-    def get_market_anomalies_df(
-        self,
-        start_date: int,
-        end_date: int,
-        customer: str
-    ) -> pd.DataFrame:
-        """
-        Get market anomalies data.
-
-        Args:
-            start_date: Start date in YYYYMMDD format
-            end_date: End date in YYYYMMDD format
-            customer: Customer name to filter by
-
-        Returns:
-            pandas DataFrame with anomalies data
-        """
-        query = f"""
-        SELECT sales_date, customer, metro_market AS mkt, segment_name AS seg, region_name,
-               depart_period, carrier_group, cabin_group, top_offenders, impacted_dates,
-               ROUND(impacted_dates_percentage, 2) AS impact_dates_pcnt,
-               itinerary_count, segment_name || ':' || metro_market AS seg_mkt,
-               competitive_position,
-               ROUND(itinerary_percentage, 2) AS freq_pcnt,
-               ROUND(avg_diff_min_ow, 2) AS mag_nominal,
-               ROUND(avg_pcnt_diff_min_ow, 2) AS mag_pcnt
-        FROM analytics.market_level_anomalies
-        WHERE sales_date >= {start_date}
-          AND sales_date <= {end_date}
-          AND customer = '{customer}'
-        """
-
-        df = self.execute_query(query)
-
-        # Process dates
-        if not df.empty and 'sales_date' in df.columns:
-            df["sales_date"] = pd.to_datetime(df["sales_date"].astype(str), format="%Y%m%d")
-            df["dow"] = df["sales_date"].dt.strftime("%A").str[:3]
-            df["sales_date"] = df["sales_date"].dt.strftime("%Y%m%d").astype(int)
-
-        return df
-
-    def get_oag_scores(self, customer: str) -> pd.DataFrame:
-        """
-        Get OAG scores for a customer.
-
-        Args:
-            customer: Customer name
-
-        Returns:
-            pandas DataFrame with OAG scores
-        """
-        query = f"""
-        SELECT *
-        FROM analytics.oag_score_v2
-        WHERE run_date = (
-            SELECT MAX(run_date)
-            FROM analytics.oag_score_v2
-        ) AND customer = '{customer}'
-        """
-        return self.execute_query(query)
-
-    def get_revenue_scores(
-        self,
-        customer: str,
-        sales_date: int | None = None
-    ) -> pd.DataFrame:
-        """
-        Get revenue scores for a customer.
-
-        Args:
-            customer: Customer name
-            sales_date: Optional specific sales date (uses max if not provided)
-
-        Returns:
-            pandas DataFrame with revenue scores
-        """
-        query = f"""
-        SELECT customer, ap_band, origin_metro, destination_metro, cabin_group,
-               midt_pax, selected_fare, estimated_revenue, revenue_score
-        FROM analytics.revenue_score_v1
-        WHERE sales_date = (
-            SELECT MAX(sales_date)
-            FROM analytics.revenue_score_v1
-        )
-          AND customer = '{customer}'
-        """
-        return self.execute_query(query)
-
-    def get_impact_score_weights(self, customer: str | None = None) -> pd.DataFrame:
-        """
-        Retrieve impact score weights from analytics.anomalies_impact_score_weights.
-
-        Falls back to '*' (all customers) if specific customer weights not found.
-
-        Args:
-            customer: Optional customer name (uses '*' default if not found)
-
-        Returns:
-            pandas DataFrame with impact score weights
-        """
-        query = """
-        SELECT customer, dimension, weights
-        FROM analytics.anomalies_impact_score_weights
-        """
-
-        df = self.execute_query(query)
-
-        if df.empty:
-            log.warning("No weights found in analytics.anomalies_impact_score_weights")
-            return df
-
-        # If customer is specified, try to get customer-specific weights first
-        if customer:
-            customer_weights = df[df['customer'] == customer]
-            if not customer_weights.empty:
-                log.info(f"Found weights for customer: {customer}")
-                return customer_weights
-
-        # Fall back to '*' (all customers) weights
-        default_weights = df[df['customer'] == '*']
-        if not default_weights.empty:
-            log.info("Using default weights ('*')")
-            return default_weights
-
-        # If no weights found, return empty dataframe
-        log.warning(f"No weights found for customer {customer} or default '*'")
-        return df
+__all__ = ["AnalyticsReader"]

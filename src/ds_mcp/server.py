@@ -19,6 +19,8 @@ from typing import List, Sequence
 
 from mcp.server.fastmcp import FastMCP
 
+from ds_mcp.core.connectors import AnalyticsReader
+
 
 logging.basicConfig(
     level=logging.INFO,
@@ -27,6 +29,17 @@ logging.basicConfig(
 )
 
 log = logging.getLogger(__name__)
+
+# Global AnalyticsReader instance (initialized lazily)
+_analytics_reader = None
+
+
+def get_analytics_reader() -> AnalyticsReader:
+    """Get or create the global AnalyticsReader instance."""
+    global _analytics_reader
+    if _analytics_reader is None:
+        _analytics_reader = AnalyticsReader()
+    return _analytics_reader
 
 
 def create_mcp_server(
@@ -40,8 +53,75 @@ def create_mcp_server(
     if table_slugs:
         log.info("Configured tables: %s", ", ".join(table_slugs))
 
-    # Core MCP server created - tools would be registered by integrating systems
+    # Register analytics tools
+    _register_analytics_tools(mcp)
+
     return mcp
+
+
+def _register_analytics_tools(mcp: FastMCP) -> None:
+    """Register analytics database tools with the MCP server."""
+    reader = get_analytics_reader()
+
+    @mcp.tool()
+    def describe_table(table_name: str) -> dict:
+        """
+        Get metadata and key information about a table.
+
+        Args:
+            table_name: Full table name (e.g., 'analytics.market_level_anomalies')
+
+        Returns:
+            Dictionary with table metadata
+        """
+        return reader.describe_table(table_name)
+
+    @mcp.tool()
+    def get_table_schema(table_name: str) -> str:
+        """
+        Get full column information for a table.
+
+        Args:
+            table_name: Full table name (e.g., 'analytics.oag_score_v2')
+
+        Returns:
+            JSON string of column information DataFrame
+        """
+        df = reader.get_table_schema(table_name)
+        return df.to_json(orient='records', indent=2)
+
+    @mcp.tool()
+    def read_table_head(table_name: str, limit: int = 50) -> str:
+        """
+        Get data preview (first N rows) from a table.
+
+        Args:
+            table_name: Full table name (e.g., 'analytics.revenue_score_v1')
+            limit: Number of rows to return (default: 50)
+
+        Returns:
+            JSON string of DataFrame with first N rows
+        """
+        df = reader.read_table_head(table_name, limit)
+        return df.to_json(orient='records', indent=2)
+
+    @mcp.tool()
+    def query_table(query: str, limit: int = 1000) -> str:
+        """
+        Execute a SELECT query on the database.
+
+        Args:
+            query: SQL SELECT statement
+            limit: Maximum rows to return (default: 1000, safety limit)
+
+        Returns:
+            JSON string of query results DataFrame
+        """
+        df = reader.query_table(query, limit)
+        return df.to_json(orient='records', indent=2)
+
+    log.info("Registered analytics tools: describe_table, get_table_schema, read_table_head, "
+             "query_table")
 
 
 def run_server(server_name: str = "DS-MCP Server", table_slugs: Sequence[str] | None = None) -> None:
