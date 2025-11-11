@@ -1,7 +1,9 @@
 """
 Core functionality for DS-MCP.
 
-Provides base classes and utilities for the MCP server framework.
+Provides database connectors and utilities for the MCP server framework.
 """
 
-__all__ = []
+from ds_mcp.core.connectors import AnalyticsReader
+
+__all__ = ["AnalyticsReader"]
