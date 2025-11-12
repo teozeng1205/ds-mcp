@@ -182,5 +182,172 @@ class AnalyticsReader(redshift_connector.RedshiftConnector):
             log.info(f"Query returned {len(df)} rows")
             return df
 
+    def get_top_site_issues(self, target_date: str | None = None) -> pd.DataFrame:
+        """
+        Get top site issues for today and compare with last week and last month.
+
+        Args:
+            target_date: Date in YYYYMMDD format (default: today)
+
+        Returns:
+            DataFrame with issue_sources, issue_reasons, and counts for today, last week, last month
+        """
+        import datetime
+
+        if target_date is None:
+            target_date = datetime.date.today().strftime("%Y%m%d")
+
+        # Parse target date
+        target = datetime.datetime.strptime(str(target_date), "%Y%m%d").date()
+        last_week = (target - datetime.timedelta(days=7)).strftime("%Y%m%d")
+        last_month = (target - datetime.timedelta(days=30)).strftime("%Y%m%d")
+
+        query = f"""
+        WITH today_issues AS (
+            SELECT
+                issue_sources,
+                issue_reasons,
+                sitecode,
+                COUNT(*) as today_count
+            FROM prod.monitoring.provider_combined_audit
+            WHERE sales_date = {target_date}
+              AND issue_sources IS NOT NULL
+              AND issue_reasons IS NOT NULL
+            GROUP BY issue_sources, issue_reasons, sitecode
+        ),
+        last_week_issues AS (
+            SELECT
+                issue_sources,
+                issue_reasons,
+                sitecode,
+                COUNT(*) as last_week_count
+            FROM prod.monitoring.provider_combined_audit
+            WHERE sales_date = {last_week}
+              AND issue_sources IS NOT NULL
+              AND issue_reasons IS NOT NULL
+            GROUP BY issue_sources, issue_reasons, sitecode
+        ),
+        last_month_issues AS (
+            SELECT
+                issue_sources,
+                issue_reasons,
+                sitecode,
+                COUNT(*) as last_month_count
+            FROM prod.monitoring.provider_combined_audit
+            WHERE sales_date = {last_month}
+              AND issue_sources IS NOT NULL
+              AND issue_reasons IS NOT NULL
+            GROUP BY issue_sources, issue_reasons, sitecode
+        )
+        SELECT
+            COALESCE(t.sitecode, lw.sitecode, lm.sitecode) as sitecode,
+            COALESCE(t.issue_sources, lw.issue_sources, lm.issue_sources) as issue_sources,
+            COALESCE(t.issue_reasons, lw.issue_reasons, lm.issue_reasons) as issue_reasons,
+            COALESCE(t.today_count, 0) as today_count,
+            COALESCE(lw.last_week_count, 0) as last_week_count,
+            COALESCE(lm.last_month_count, 0) as last_month_count,
+            COALESCE(t.today_count, 0) - COALESCE(lw.last_week_count, 0) as week_over_week_change,
+            COALESCE(t.today_count, 0) - COALESCE(lm.last_month_count, 0) as month_over_month_change
+        FROM today_issues t
+        FULL OUTER JOIN last_week_issues lw
+            ON t.sitecode = lw.sitecode
+            AND t.issue_sources = lw.issue_sources
+            AND t.issue_reasons = lw.issue_reasons
+        FULL OUTER JOIN last_month_issues lm
+            ON COALESCE(t.sitecode, lw.sitecode) = lm.sitecode
+            AND COALESCE(t.issue_sources, lw.issue_sources) = lm.issue_sources
+            AND COALESCE(t.issue_reasons, lw.issue_reasons) = lm.issue_reasons
+        WHERE COALESCE(t.today_count, lw.last_week_count, lm.last_month_count) > 0
+        ORDER BY today_count DESC
+        LIMIT 50;
+        """
+
+        log.info(f"Getting top site issues for date: {target_date}")
+        with self.get_connection().cursor() as cursor:
+            cursor.execute(query)
+            colnames = [desc[0] for desc in cursor.description]
+            records = cursor.fetchall()
+            df = pd.DataFrame(records, columns=colnames)
+            log.info(f"Found {len(df)} issue combinations")
+            return df
+
+    def analyze_issue_scope(
+        self,
+        providercode: str,
+        sitecode: str,
+        target_date: str | None = None,
+        lookback_days: int = 7
+    ) -> pd.DataFrame:
+        """
+        Analyze the scope of issues for a specific provider and site combination.
+
+        Args:
+            providercode: Provider code (e.g., 'QL2')
+            sitecode: Site code (e.g., 'QF')
+            target_date: Date in YYYYMMDD format (default: today)
+            lookback_days: Number of days to analyze (default: 7)
+
+        Returns:
+            DataFrame with issue breakdown by multiple dimensions
+        """
+        import datetime
+
+        if target_date is None:
+            target_date = datetime.date.today().strftime("%Y%m%d")
+
+        # Parse target date and calculate lookback
+        target = datetime.datetime.strptime(str(target_date), "%Y%m%d").date()
+        start_date = (target - datetime.timedelta(days=lookback_days)).strftime("%Y%m%d")
+
+        query = f"""
+        SELECT
+            providercode,
+            sitecode,
+            pos,
+            triptype,
+            los,
+            cabin,
+            originairportcode,
+            destinationairportcode,
+            origincitycode,
+            destinationcitycode,
+            origincountrycode,
+            destinationcountrycode,
+            departdate,
+            EXTRACT(DOW FROM TO_DATE(CAST(departdate AS VARCHAR), 'YYYYMMDD')) as depart_dow,
+            DATE_PART('hour', observationtimestamp) as observation_hour,
+            issue_sources,
+            issue_reasons,
+            response_statuses,
+            filterreason,
+            COUNT(*) as issue_count,
+            COUNT(DISTINCT sales_date) as days_with_issues,
+            MIN(sales_date) as first_seen_date,
+            MAX(sales_date) as last_seen_date
+        FROM prod.monitoring.provider_combined_audit
+        WHERE providercode = '{providercode}'
+          AND sitecode = '{sitecode}'
+          AND sales_date BETWEEN {start_date} AND {target_date}
+          AND (issue_sources IS NOT NULL OR filterreason IS NOT NULL)
+        GROUP BY
+            providercode, sitecode, pos, triptype, los, cabin,
+            originairportcode, destinationairportcode,
+            origincitycode, destinationcitycode,
+            origincountrycode, destinationcountrycode,
+            departdate, depart_dow, observation_hour,
+            issue_sources, issue_reasons, response_statuses, filterreason
+        ORDER BY issue_count DESC
+        LIMIT 100;
+        """
+
+        log.info(f"Analyzing issue scope for provider={providercode}, site={sitecode}, date={target_date}")
+        with self.get_connection().cursor() as cursor:
+            cursor.execute(query)
+            colnames = [desc[0] for desc in cursor.description]
+            records = cursor.fetchall()
+            df = pd.DataFrame(records, columns=colnames)
+            log.info(f"Found {len(df)} dimensional breakdowns")
+            return df
+
 
 __all__ = ["AnalyticsReader"]

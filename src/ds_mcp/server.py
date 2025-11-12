@@ -120,8 +120,81 @@ def _register_analytics_tools(mcp: FastMCP) -> None:
         df = reader.query_table(query, limit)
         return df.to_json(orient='records', indent=2)
 
+    @mcp.tool()
+    def get_top_site_issues(target_date: str | None = None) -> str:
+        """
+        Get top site issues for a specific date and compare with last week and last month.
+
+        This function analyzes the provider_combined_audit table to identify the most common
+        site issues and provides trend comparison.
+
+        Args:
+            target_date: Date in YYYYMMDD format (e.g., '20251109'). If not provided, uses today's date.
+
+        Returns:
+            JSON string with columns:
+            - sitecode: Site code with issues
+            - issue_sources: Source of the issue (e.g., 'request', 'response')
+            - issue_reasons: Reason for the issue (e.g., 'Flights N/A', 'Direct Flight N/A')
+            - today_count: Number of issues on target date
+            - last_week_count: Number of issues 7 days ago
+            - last_month_count: Number of issues 30 days ago
+            - week_over_week_change: Change from last week
+            - month_over_month_change: Change from last month
+
+        Example:
+            get_top_site_issues('20251109')
+            get_top_site_issues()  # Uses today's date
+        """
+        try:
+            df = reader.get_top_site_issues(target_date)
+            return df.to_json(orient='records', indent=2)
+        except Exception as e:
+            log.error(f"get_top_site_issues failed: {e}", exc_info=True)
+            return f'{{"error": "Failed to get top site issues: {str(e)}"}}'
+
+    @mcp.tool()
+    def analyze_issue_scope(
+        providercode: str,
+        sitecode: str,
+        target_date: str | None = None,
+        lookback_days: int = 7
+    ) -> str:
+        """
+        Analyze the scope and dimensions of issues for a specific provider and site combination.
+
+        This function breaks down issues by multiple dimensions to identify patterns and
+        concentrations in the data.
+
+        Args:
+            providercode: Provider code to analyze (e.g., 'QL2', 'Atlas', 'SS')
+            sitecode: Site code to analyze (e.g., 'QF', 'DY', 'ET')
+            target_date: End date in YYYYMMDD format (default: today)
+            lookback_days: Number of days to look back from target_date (default: 7)
+
+        Returns:
+            JSON string with dimensional breakdown including:
+            - Geographic dimensions: POS, origin/destination airports/cities/countries
+            - Travel dimensions: triptype, LOS (length of stay), cabin, departdate, depart_dow (day of week)
+            - Temporal dimensions: observation_hour (hour of observation)
+            - Issue details: issue_sources, issue_reasons, response_statuses, filterreason
+            - Metrics: issue_count, days_with_issues, first_seen_date, last_seen_date
+
+        Example:
+            analyze_issue_scope('QL2', 'QF')
+            analyze_issue_scope('QL2', 'QF', '20251109', 14)  # Last 14 days
+        """
+        try:
+            df = reader.analyze_issue_scope(providercode, sitecode, target_date, lookback_days)
+            if len(df) == 0:
+                return f'{{"message": "No issues found for provider={providercode}, site={sitecode}"}}'
+            return df.to_json(orient='records', indent=2)
+        except Exception as e:
+            log.error(f"analyze_issue_scope failed: {e}", exc_info=True)
+            return f'{{"error": "Failed to analyze issue scope: {str(e)}"}}'
+
     log.info("Registered analytics tools: describe_table, get_table_schema, read_table_head, "
-             "query_table")
+             "query_table, get_top_site_issues, analyze_issue_scope")
 
 
 def run_server(server_name: str = "DS-MCP Server", table_slugs: Sequence[str] | None = None) -> None:
