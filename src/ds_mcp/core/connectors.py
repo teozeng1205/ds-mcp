@@ -40,18 +40,35 @@ class AnalyticsReader(redshift_connector.RedshiftConnector):
         Get metadata and key information about a table.
 
         Args:
-            table_name: Full table name (e.g., 'monitoring.provider_combined_audit')
+            table_name: Full table name (e.g., 'price_anomalies.anomaly_table').
+                       For cross-database queries (e.g., 'prod.monitoring.table'),
+                       note that information_schema only shows tables in the current database.
+                       Use read_table_head() or query_table() for cross-database access.
 
         Returns:
             dict with table metadata
         """
+        # Parse table name - handle both 2-part and 3-part names
+        parts = table_name.split('.')
+        if len(parts) == 3:
+            # database.schema.table format
+            schema = parts[1]
+            table = parts[2]
+        elif len(parts) == 2:
+            # schema.table format
+            schema = parts[0]
+            table = parts[1]
+        else:
+            return {"error": f"Invalid table name format: {table_name}. Use 'schema.table' or 'database.schema.table'"}
+
         query = f"""
         SELECT
             table_schema,
             table_name,
             table_type
         FROM information_schema.tables
-        WHERE table_schema || '.' || table_name = '{table_name}'
+        WHERE table_schema = '{schema}'
+          AND table_name = '{table}'
         LIMIT 1;
         """
 
@@ -71,12 +88,26 @@ class AnalyticsReader(redshift_connector.RedshiftConnector):
         Get full column information for a table.
 
         Args:
-            table_name: Full table name (e.g., 'monitoring.provider_combined_audit')
+            table_name: Full table name (e.g., 'price_anomalies.anomaly_table').
+                       For cross-database queries (e.g., 'prod.monitoring.table'),
+                       note that information_schema only shows tables in the current database.
+                       Use read_table_head() or query_table() for cross-database access.
 
         Returns:
             DataFrame with column information
         """
-        schema, table = table_name.split('.')
+        # Parse table name - handle both 2-part and 3-part names
+        parts = table_name.split('.')
+        if len(parts) == 3:
+            # database.schema.table format
+            schema = parts[1]
+            table = parts[2]
+        elif len(parts) == 2:
+            # schema.table format
+            schema = parts[0]
+            table = parts[1]
+        else:
+            raise ValueError(f"Invalid table name format: {table_name}. Use 'schema.table' or 'database.schema.table'")
 
         query = f"""
         SELECT
