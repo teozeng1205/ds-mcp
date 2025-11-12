@@ -38,7 +38,15 @@ def get_analytics_reader() -> AnalyticsReader:
     """Get or create the global AnalyticsReader instance."""
     global _analytics_reader
     if _analytics_reader is None:
-        _analytics_reader = AnalyticsReader()
+        try:
+            _analytics_reader = AnalyticsReader()
+        except Exception as e:
+            log.error(f"Failed to initialize AnalyticsReader: {e}")
+            log.error("Please ensure you are connected to VPN and have proper database credentials")
+            raise RuntimeError(
+                "Cannot connect to Redshift database. "
+                "Please check: (1) VPN connection, (2) database credentials, (3) network connectivity"
+            ) from e
     return _analytics_reader
 
 
