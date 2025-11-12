@@ -1,19 +1,67 @@
 ds-mcp
 
-- What: Minimal MCP servers for Provider Combined Audit and Market Anomalies.
+- What: MCP server for database exploration using AnalyticsReader with Redshift connector.
 
 - Quick Start (repo root)
   - python -m venv .venv && source .venv/bin/activate
   - pip install -U openai-agents
-  - pip install -e ds-threevictors -r ds-mcp/requirements.txt -e ds-mcp
-  - Create `env.sh` at repo root with `AWS_PROFILE`, `AWS_DEFAULT_REGION`, `OPENAI_API_KEY`
-- Run server: `bash ds-mcp/scripts/run_mcp_server.sh [slug ...]` (use `--list` to see options or provide multiple table identifiers)
+  - pip install threevictors pandas redshift-connector
+  - pip install -e ds-mcp
+  - Setup AWS credentials: `assume 3VDEV` (or appropriate environment)
+
+- Run server: `python -m ds_mcp.server --name "Analytics Server"`
 
 - Connect from a client
-  - Use any MCP client to connect to the servers started above.
+  - Use any MCP client to connect to the server started above
+  - Or use the interactive chat: `python chat.py`
 
-- More
-  - Details and table guides: `docs/`
+## Core Tools
+
+The MCP server exposes 4 core analytics tools via AnalyticsReader:
+
+1. **describe_table(table_name)** - Get table metadata (schema, type)
+   - Works for current database tables (e.g., `price_anomalies.anomaly_table`)
+   - For cross-database queries, use `read_table_head()` instead
+
+2. **get_table_schema(table_name)** - Get column information (names, types, nullable)
+   - Works for current database tables
+   - For cross-database queries, use `read_table_head()` instead
+
+3. **read_table_head(table_name, limit=50)** - Preview first N rows
+   - Supports cross-database queries (e.g., `prod.monitoring.provider_combined_audit`)
+   - Returns pandas DataFrame as JSON
+
+4. **query_table(query, limit=1000)** - Execute custom SELECT queries
+   - Full SQL SELECT support with safety limits
+   - Supports cross-database queries
+   - Returns pandas DataFrame as JSON
+
+## Example Usage
+
+```python
+from ds_mcp.core.connectors import AnalyticsReader
+
+reader = AnalyticsReader()
+
+# Preview data from cross-database table
+df = reader.read_table_head('prod.monitoring.provider_combined_audit', limit=10)
+
+# Custom SQL query
+df = reader.query_table('''
+    SELECT * FROM prod.monitoring.provider_combined_audit
+    WHERE sales_date = 20251109
+    LIMIT 100
+''')
+
+# Get schema for current database table
+schema = reader.get_table_schema('price_anomalies.anomaly_table')
+```
+
+## Notes
+
+- Cross-database queries: `describe_table()` and `get_table_schema()` work only within the current database due to Redshift information_schema limitations
+- For cross-database table exploration (e.g., `prod.monitoring.*`), use `read_table_head()` or `query_table()`
+- All queries require proper AWS credentials and Redshift access
 
 ## Authoring tables
 
