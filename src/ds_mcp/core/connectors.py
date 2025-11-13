@@ -133,7 +133,7 @@ class AnalyticsReader(redshift_connector.RedshiftConnector):
         Get data preview (first N rows) from a table.
 
         Args:
-            table_name: Full table name (e.g., 'monitoring.provider_combined_audit')
+            table_name: Full table name (e.g., 'prod.monitoring.provider_combined_audit')
             limit: Number of rows to return (default: 50)
 
         Returns:
@@ -273,17 +273,17 @@ class AnalyticsReader(redshift_connector.RedshiftConnector):
 
     def analyze_issue_scope(
         self,
-        providercode: str,
-        sitecode: str,
+        providercode: str | None = None,
+        sitecode: str | None = None,
         target_date: str | None = None,
         lookback_days: int = 7
     ) -> pd.DataFrame:
         """
-        Analyze the scope of issues for a specific provider and site combination.
+        Analyze the scope of issues for providers and/or sites.
 
         Args:
-            providercode: Provider code (e.g., 'QL2')
-            sitecode: Site code (e.g., 'QF')
+            providercode: Provider code(s) - single code (e.g., 'QL2') or comma-separated (e.g., 'QL2,Atlas')
+            sitecode: Site code(s) - single code (e.g., 'QF') or comma-separated (e.g., 'QF,DY')
             target_date: Date in YYYYMMDD format (default: today)
             lookback_days: Number of days to analyze (default: 7)
 
@@ -298,6 +298,32 @@ class AnalyticsReader(redshift_connector.RedshiftConnector):
         # Parse target date and calculate lookback
         target = datetime.datetime.strptime(str(target_date), "%Y%m%d").date()
         start_date = (target - datetime.timedelta(days=lookback_days)).strftime("%Y%m%d")
+
+        # Build WHERE clause dynamically
+        where_clauses = []
+
+        if providercode:
+            # Handle multiple providers
+            providers = [p.strip() for p in providercode.split(',')]
+            if len(providers) == 1:
+                where_clauses.append(f"providercode = '{providers[0]}'")
+            else:
+                provider_list = "', '".join(providers)
+                where_clauses.append(f"providercode IN ('{provider_list}')")
+
+        if sitecode:
+            # Handle multiple sites
+            sites = [s.strip() for s in sitecode.split(',')]
+            if len(sites) == 1:
+                where_clauses.append(f"sitecode = '{sites[0]}'")
+            else:
+                site_list = "', '".join(sites)
+                where_clauses.append(f"sitecode IN ('{site_list}')")
+
+        where_clauses.append(f"sales_date BETWEEN {start_date} AND {target_date}")
+        where_clauses.append("(issue_sources IS NOT NULL OR filterreason IS NOT NULL)")
+
+        where_clause = " AND ".join(where_clauses)
 
         query = f"""
         SELECT
@@ -325,10 +351,7 @@ class AnalyticsReader(redshift_connector.RedshiftConnector):
             MIN(sales_date) as first_seen_date,
             MAX(sales_date) as last_seen_date
         FROM prod.monitoring.provider_combined_audit
-        WHERE providercode = '{providercode}'
-          AND sitecode = '{sitecode}'
-          AND sales_date BETWEEN {start_date} AND {target_date}
-          AND (issue_sources IS NOT NULL OR filterreason IS NOT NULL)
+        WHERE {where_clause}
         GROUP BY
             providercode, sitecode, pos, triptype, los, cabin,
             originairportcode, destinationairportcode,

@@ -71,6 +71,16 @@ def _register_analytics_tools(mcp: FastMCP) -> None:
     """Register analytics database tools with the MCP server."""
     reader = get_analytics_reader()
 
+    @mcp.resource("table://available_tables")
+    def get_available_tables() -> str:
+        """
+        List of commonly used tables in the analytics database.
+
+        Returns:
+            Information about available tables and their full names.
+        """
+        return "There is a table called prod.monitoring.provider_combined_audit"
+
     @mcp.tool()
     def describe_table(table_name: str) -> dict:
         """
@@ -101,7 +111,8 @@ def _register_analytics_tools(mcp: FastMCP) -> None:
     @mcp.tool()
     def read_table_head(table_name: str, limit: int = 50) -> str:
         """
-        Get data preview (first N rows) from a table.
+        Get data preview (first N rows) from a table. Use for schema exploration only.
+        For filtered data or analysis, write a SQL query using query_table instead.
 
         Args:
             table_name: Full table name (e.g., 'analytics.revenue_score_v1')
@@ -163,20 +174,20 @@ def _register_analytics_tools(mcp: FastMCP) -> None:
 
     @mcp.tool()
     def analyze_issue_scope(
-        providercode: str,
-        sitecode: str,
+        providercode: str | None = None,
+        sitecode: str | None = None,
         target_date: str | None = None,
         lookback_days: int = 7
     ) -> str:
         """
-        Analyze the scope and dimensions of issues for a specific provider and site combination.
+        Analyze the scope and dimensions of issues for providers and/or sites.
 
         This function breaks down issues by multiple dimensions to identify patterns and
-        concentrations in the data.
+        concentrations in the data. You can filter by provider, site, or both.
 
         Args:
-            providercode: Provider code to analyze (e.g., 'QL2', 'Atlas', 'SS')
-            sitecode: Site code to analyze (e.g., 'QF', 'DY', 'ET')
+            providercode: Provider code(s) - single (e.g., 'QL2') or comma-separated (e.g., 'QL2,Atlas')
+            sitecode: Site code(s) - single (e.g., 'QF') or comma-separated (e.g., 'QF,DY')
             target_date: End date in YYYYMMDD format (default: today)
             lookback_days: Number of days to look back from target_date (default: 7)
 
@@ -189,13 +200,22 @@ def _register_analytics_tools(mcp: FastMCP) -> None:
             - Metrics: issue_count, days_with_issues, first_seen_date, last_seen_date
 
         Example:
-            analyze_issue_scope('QL2', 'QF')
-            analyze_issue_scope('QL2', 'QF', '20251109', 14)  # Last 14 days
+            analyze_issue_scope(providercode='QL2', sitecode='QF')  # Single provider and site
+            analyze_issue_scope(sitecode='QF')  # All providers for QF site
+            analyze_issue_scope(providercode='QL2')  # All sites for QL2 provider
+            analyze_issue_scope(sitecode='QF,DY,ET')  # Multiple sites
+            analyze_issue_scope(providercode='QL2,Atlas')  # Multiple providers
         """
         try:
             df = reader.analyze_issue_scope(providercode, sitecode, target_date, lookback_days)
             if len(df) == 0:
-                return f'{{"message": "No issues found for provider={providercode}, site={sitecode}"}}'
+                filter_desc = []
+                if providercode:
+                    filter_desc.append(f"provider={providercode}")
+                if sitecode:
+                    filter_desc.append(f"site={sitecode}")
+                filter_str = ", ".join(filter_desc) if filter_desc else "specified filters"
+                return f'{{"message": "No issues found for {filter_str}"}}'
             return df.to_json(orient='records', indent=2)
         except Exception as e:
             log.error(f"analyze_issue_scope failed: {e}", exc_info=True)
