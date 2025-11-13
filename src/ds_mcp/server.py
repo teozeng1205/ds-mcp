@@ -62,14 +62,20 @@ def create_mcp_server(
         log.info("Configured tables: %s", ", ".join(table_slugs))
 
     # Register analytics tools
-    _register_analytics_tools(mcp)
+    _register_analytics_tools(mcp, common_tables=table_slugs)
 
     return mcp
 
 
-def _register_analytics_tools(mcp: FastMCP) -> None:
+def _register_analytics_tools(mcp: FastMCP, common_tables: Sequence[str] | None = None) -> None:
     """Register analytics database tools with the MCP server."""
     reader = get_analytics_reader()
+
+    # Default common tables if none provided
+    if not common_tables:
+        common_tables = ["prod.monitoring.provider_combined_audit", "local.analytics.market_level_anomalies_v3"]
+
+    common_tables_str = ", ".join(common_tables)
 
     @mcp.resource("table://available_tables")
     def get_available_tables() -> str:
@@ -79,7 +85,7 @@ def _register_analytics_tools(mcp: FastMCP) -> None:
         Returns:
             Information about available tables and their full names.
         """
-        return "There is a table called prod.monitoring.provider_combined_audit"
+        return f"Common tables: {common_tables_str}"
 
     @mcp.tool()
     def describe_table(table_name: str) -> dict:
@@ -110,12 +116,14 @@ def _register_analytics_tools(mcp: FastMCP) -> None:
 
     @mcp.tool()
     def read_table_head(table_name: str, limit: int = 50) -> str:
-        """
+        f"""
         Get data preview (first N rows) from a table. Use for schema exploration only.
         For filtered data or analysis, write a SQL query using query_table instead.
 
+        Common tables: {common_tables_str}
+
         Args:
-            table_name: Full table name (e.g., 'analytics.revenue_score_v1')
+            table_name: Full table name (e.g., '{common_tables[0] if common_tables else "schema.table"}')
             limit: Number of rows to return (default: 50)
 
         Returns:
@@ -126,8 +134,10 @@ def _register_analytics_tools(mcp: FastMCP) -> None:
 
     @mcp.tool()
     def query_table(query: str, limit: int = 1000) -> str:
-        """
+        f"""
         Execute a SELECT query on the database.
+
+        Common tables: {common_tables_str}
 
         Args:
             query: SQL SELECT statement
