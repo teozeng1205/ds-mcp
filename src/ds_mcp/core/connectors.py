@@ -211,8 +211,8 @@ class AnalyticsReader(redshift_connector.RedshiftConnector):
                 COUNT(*) as today_count
             FROM prod.monitoring.provider_combined_audit
             WHERE sales_date = {target_date}
-              AND issue_sources IS NOT NULL
-              AND issue_reasons IS NOT NULL
+              AND issue_sources != ''
+              AND issue_reasons != ''
             GROUP BY issue_sources, issue_reasons, sitecode
         ),
         last_week_issues AS (
@@ -223,8 +223,8 @@ class AnalyticsReader(redshift_connector.RedshiftConnector):
                 COUNT(*) as last_week_count
             FROM prod.monitoring.provider_combined_audit
             WHERE sales_date = {last_week}
-              AND issue_sources IS NOT NULL
-              AND issue_reasons IS NOT NULL
+              AND issue_sources != ''
+              AND issue_reasons != ''
             GROUP BY issue_sources, issue_reasons, sitecode
         ),
         last_month_issues AS (
@@ -235,8 +235,8 @@ class AnalyticsReader(redshift_connector.RedshiftConnector):
                 COUNT(*) as last_month_count
             FROM prod.monitoring.provider_combined_audit
             WHERE sales_date = {last_month}
-              AND issue_sources IS NOT NULL
-              AND issue_reasons IS NOT NULL
+              AND issue_sources != ''
+              AND issue_reasons != ''
             GROUP BY issue_sources, issue_reasons, sitecode
         )
         SELECT
@@ -321,7 +321,7 @@ class AnalyticsReader(redshift_connector.RedshiftConnector):
                 where_clauses.append(f"sitecode IN ('{site_list}')")
 
         where_clauses.append(f"sales_date BETWEEN {start_date} AND {target_date}")
-        where_clauses.append("(issue_sources IS NOT NULL OR filterreason IS NOT NULL)")
+        where_clauses.append("(issue_sources != '' OR filterreason != '')")
 
         where_clause = " AND ".join(where_clauses)
 
