@@ -1,106 +1,70 @@
-ds-mcp
+# ds-mcp
 
-- What: MCP server for database exploration using AnalyticsReader with Redshift connector.
+Model Context Protocol (MCP) server that turns our analytics Redshift data into first-class tools for OpenAI Agents.  
+It launches as a subprocess, registers table-aware utilities, and streams JSON results back to any MCP-compliant client (CLI, FastAPI backend, or other agents).
 
-- Quick Start (repo root)
-  - python -m venv .venv && source .venv/bin/activate
-  - pip install -U openai-agents
-  - pip install threevictors pandas redshift-connector
-  - pip install -e ds-mcp
-  - Setup AWS credentials: `assume 3VDEV` (or appropriate environment)
+## Features
 
-- Run server: `python -m ds_mcp.server --name "Analytics Server"`
+- **AnalyticsReader wrapper** – reuses the internal `threevictors.dao.redshift_connector` for credentialed access.
+- **FastMCP-based server** – lightweight async implementation with stdio transport.
+- **Tool catalog** – describe tables, inspect schemas, preview rows, execute bounded SQL, and run provider monitoring helpers (`get_top_site_issues`, `analyze_issue_scope`).
+- **Configurable tables** – pass `--table <schema.table>` repeatedly to restrict what the agent can see.
+- **Safe defaults** – SELECT-only enforcement plus automatic `LIMIT` behavior for arbitrary SQL.
 
-- Connect from a client
-  - Use any MCP client to connect to the server started above
-  - Or use the interactive chat: `python chat.py`
+## Installation
 
-## Core Tools
+```bash
+cd ds-agentic-workflows/ds-mcp
+python -m venv .venv && source .venv/bin/activate
+pip install -U pip
+pip install -r requirements.txt         # mcp[cli], pandas, boto3, redshift-connector …
+pip install -e .                        # optional editable install
+```
 
-The MCP server exposes 4 core analytics tools via AnalyticsReader:
+Set your AWS profile / credentials and OpenAI key in the repo-level `env.sh` before running anything. The AnalyticsReader expects VPN + AWS SSO access to the analytics Redshift environment (e.g., `aws sso login --profile 3VDEV`).
 
-1. **describe_table(table_name)** - Get table metadata (schema, type)
-   - Works for current database tables (e.g., `price_anomalies.anomaly_table`)
-   - For cross-database queries, use `read_table_head()` instead
+## Running the Server
 
-2. **get_table_schema(table_name)** - Get column information (names, types, nullable)
-   - Works for current database tables
-   - For cross-database queries, use `read_table_head()` instead
+```bash
+# From ds-mcp/
+python -m ds_mcp.server --name "Analytics Server"
 
-3. **read_table_head(table_name, limit=50)** - Preview first N rows
-   - Supports cross-database queries (e.g., `prod.monitoring.provider_combined_audit`)
-   - Returns pandas DataFrame as JSON
+# Limit tools to specific tables
+python -m ds_mcp.server --name "Provider Audit" \
+  --table prod.monitoring.provider_combined_audit \
+  --table local.analytics.market_level_anomalies_v3
+```
 
-4. **query_table(query, limit=1000)** - Execute custom SELECT queries
-   - Full SQL SELECT support with safety limits
-   - Supports cross-database queries
-   - Returns pandas DataFrame as JSON
+When invoked via `agent_core.AgentExecutor` or `scripts/run_mcp_server.sh`, the wrapper automatically sources `env.sh` and injects `PYTHONPATH` so the package can be used without installation.
 
-## Example Usage
+## Tools Exposed
+
+| Tool | Purpose |
+| --- | --- |
+| `describe_table(table_name)` | Information-schema lookup for table metadata. |
+| `get_table_schema(table_name)` | Column definitions with type, nullability, defaults. |
+| `read_table_head(table_name, limit=50)` | Preview first N rows (works across databases). |
+| `query_table(query, limit=1000)` | Executes SELECT/WITH statements with enforced limits. |
+| `get_top_site_issues(target_date?)` | Compares provider issues for today vs. last week/month. |
+| `analyze_issue_scope(providercode?, sitecode?, target_date?, lookback_days=7)` | Breaks down provider/site issues by geography, trip type, cabin, LOS, etc. |
+
+Each tool returns JSON (DataFrame `orient='records'`), which upstream agents present as structured answers.
+
+## Using the AnalyticsReader Directly
 
 ```python
 from ds_mcp.core.connectors import AnalyticsReader
 
 reader = AnalyticsReader()
-
-# Preview data from cross-database table
 df = reader.read_table_head('prod.monitoring.provider_combined_audit', limit=10)
-
-# Custom SQL query
-df = reader.query_table('''
-    SELECT * FROM prod.monitoring.provider_combined_audit
-    WHERE sales_date = 20251109
-    LIMIT 100
-''')
-
-# Get schema for current database table
-schema = reader.get_table_schema('price_anomalies.anomaly_table')
+issues = reader.get_top_site_issues('20251109')
+scope = reader.analyze_issue_scope(providercode='QL2', sitecode='QF', lookback_days=14)
 ```
 
-## Notes
+## Extending the Server
 
-- Cross-database queries: `describe_table()` and `get_table_schema()` work only within the current database due to Redshift information_schema limitations
-- For cross-database table exploration (e.g., `prod.monitoring.*`), use `read_table_head()` or `query_table()`
-- All queries require proper AWS credentials and Redshift access
+1. Add new helper methods to `AnalyticsReader` for any custom SQL you need.
+2. Register them in `src/ds_mcp/server.py` using `@mcp.tool()` decorators.
+3. Bump `EXPOSED_TOOLS` / `allowed_tools` in the consuming agent to make them available.
 
-## Authoring tables
-
-Every table is described once via `ds_mcp.tables.base.build_table`. You provide
-the schema/table names, a short introduction (key columns + partitions), and any
-custom SQL helpers. The base class automatically exposes five core tools:
-
-- `describe_table()` – structured intro plus key/partition columns
-- `get_table_partitions()` – partition metadata from `svv_table_info`
-- `get_table_schema()` – metadata from `svv_columns`
-- `read_table_head(limit=50)` – quick sampling
-- `query_table(sql, max_rows=None)` – safe SELECT/WITH execution with auto LIMITs
-
-Custom tools stay declarative through `SQLToolSpec`.
-
-```python
-from ds_mcp.tables.base import ParameterSpec, SQLToolSpec, build_table, export_tools
-
-CUSTOM_TOOLS = (
-    SQLToolSpec(
-        name="latest_rows",
-        doc="Return the most recent records.",
-        sql="SELECT * FROM {{TABLE}} ORDER BY snapshot_ts DESC LIMIT :limit",
-        params=(
-            ParameterSpec(name="limit", default=50, coerce=int, min_value=1, max_value=500, as_literal=True),
-        ),
-        enforce_limit=False,
-    ),
-)
-
-TABLE = build_table(
-    slug="example",
-    schema_name="analytics",
-    table_name="example_table",
-    description="Short blurb for client prompts.",
-    key_columns=("customer", "sales_date"),
-    partition_columns=("sales_date",),
-    custom_tools=CUSTOM_TOOLS,
-)
-
-export_tools(TABLE, globals())
-```
+The MCP binary stays transport-agnostic, so any client that understands Model Context Protocol can use the new capabilities immediately.
